@@ -795,14 +795,20 @@ void DockWindow::HandleLeftClick(POINT point) {
     const auto& app = applications_[static_cast<size_t>(appIndex)];
     if (!app.windows.empty()) {
         HWND target = app.windows.front().hwnd;
-        for (const auto& window : app.windows) {
-            if (ShellActions::IsWindowActive(window.hwnd)) {
-                target = window.hwnd;
-                break;
+        if (app.windows.size() > 1) {
+            for (const auto& window : app.windows) {
+                if (ShellActions::IsWindowActive(window.hwnd)) {
+                    target = window.hwnd;
+                    break;
+                }
             }
         }
 
-        ShellActions::ToggleWindowState(target, foregroundBeforeClick_);
+        if (app.windows.size() == 1 && !IsIconic(target)) {
+            ShowWindow(target, SW_MINIMIZE);
+        } else {
+            ShellActions::ToggleWindowState(target, foregroundBeforeClick_);
+        }
     } else {
         pinnedApps_.Launch(app);
     }
