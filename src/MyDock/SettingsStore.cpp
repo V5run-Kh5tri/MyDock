@@ -1,7 +1,11 @@
 #include "SettingsStore.h"
 
+#include <Propkey.h>
 #include <ShlObj.h>
+#include <ShObjIdl.h>
+#include <wrl/client.h>
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <system_error>
@@ -10,7 +14,7 @@
 namespace MyDock {
 namespace {
 
-std::filesystem::path AppDataFolder() {
+std::filesystem::path RoamingAppDataFolder() {
     PWSTR rawPath = nullptr;
     std::filesystem::path result;
 
@@ -23,7 +27,11 @@ std::filesystem::path AppDataFolder() {
         result = std::filesystem::temp_directory_path();
     }
 
-    return result / L"MyDock";
+    return result;
+}
+
+std::filesystem::path AppDataFolder() {
+    return RoamingAppDataFolder() / L"MyDock";
 }
 
 std::vector<std::wstring> Split(const std::wstring& line, wchar_t delimiter) {
@@ -62,6 +70,109 @@ std::vector<PinnedAppDefinition> DefaultPins() {
     };
 }
 
+std::wstring ShortcutDisplayName(const std::filesystem::path& shortcutPath) {
+    auto displayName = shortcutPath.stem().wstring();
+    return displayName.empty() ? shortcutPath.filename().wstring() : displayName;
+}
+
+std::wstring ShortcutTarget(const std::filesystem::path& shortcutPath, std::wstring* iconPath, std::wstring* appUserModelId) {
+    Microsoft::WRL::ComPtr<IShellLinkW> shellLink;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(shellLink.GetAddressOf())))) {
+        return {};
+    }
+
+    Microsoft::WRL::ComPtr<IPersistFile> persistFile;
+    if (FAILED(shellLink.As(&persistFile)) || FAILED(persistFile->Load(shortcutPath.c_str(), STGM_READ))) {
+        return {};
+    }
+
+    wchar_t target[MAX_PATH] = {};
+    shellLink->GetPath(target, _countof(target), nullptr, SLGP_RAWPATH);
+
+    if (iconPath) {
+        wchar_t iconLocation[MAX_PATH] = {};
+        int iconIndex = 0;
+        if (SUCCEEDED(shellLink->GetIconLocation(iconLocation, _countof(iconLocation), &iconIndex)) && iconLocation[0] != L'\0') {
+            *iconPath = iconLocation;
+        }
+    }
+
+    if (target[0] != L'\0') {
+        return target;
+    }
+
+    Microsoft::WRL::ComPtr<IPropertyStore> properties;
+    if (SUCCEEDED(shellLink.As(&properties))) {
+        PROPVARIANT value = {};
+        PropVariantInit(&value);
+        if (SUCCEEDED(properties->GetValue(PKEY_AppUserModel_ID, &value)) && value.vt == VT_LPWSTR && value.pwszVal) {
+            if (appUserModelId) {
+                *appUserModelId = value.pwszVal;
+            }
+            PropVariantClear(&value);
+            return {};
+        }
+        PropVariantClear(&value);
+    }
+
+    return {};
+}
+
+std::vector<PinnedAppDefinition> NativeTaskbarPins() {
+    const auto taskbarPinsFolder =
+        RoamingAppDataFolder() /
+        L"Microsoft" /
+        L"Internet Explorer" /
+        L"Quick Launch" /
+        L"User Pinned" /
+        L"TaskBar";
+
+    std::error_code ec;
+    if (!std::filesystem::exists(taskbarPinsFolder, ec)) {
+        return {};
+    }
+
+    std::vector<std::filesystem::path> shortcuts;
+    for (const auto& entry : std::filesystem::directory_iterator(taskbarPinsFolder, ec)) {
+        if (ec) {
+            break;
+        }
+
+        if (entry.is_regular_file(ec) && ToLower(entry.path().extension().wstring()) == L".lnk") {
+            shortcuts.push_back(entry.path());
+        }
+    }
+
+    std::sort(shortcuts.begin(), shortcuts.end(), [](const auto& left, const auto& right) {
+        return ToLower(left.filename().wstring()) < ToLower(right.filename().wstring());
+    });
+
+    std::vector<PinnedAppDefinition> pins;
+    for (const auto& shortcut : shortcuts) {
+        std::wstring iconPath;
+        std::wstring appUserModelId;
+        std::wstring launchCommand = ShortcutTarget(shortcut, &iconPath, &appUserModelId);
+        if (launchCommand.empty()) {
+            launchCommand = shortcut.wstring();
+        }
+        if (iconPath.empty()) {
+            iconPath = launchCommand;
+        }
+
+        PinnedAppDefinition app;
+        app.displayName = ShortcutDisplayName(shortcut);
+        app.launchCommand = launchCommand;
+        app.iconPath = iconPath;
+        app.id = !appUserModelId.empty() ? ToLower(appUserModelId) : IdentityFromExecutable(launchCommand.empty() ? shortcut.wstring() : launchCommand);
+        if (app.id.empty()) {
+            app.id = ToLower(shortcut.filename().wstring());
+        }
+        pins.push_back(std::move(app));
+    }
+
+    return pins;
+}
+
 } // namespace
 
 bool SettingsStore::Load() {
@@ -71,7 +182,10 @@ bool SettingsStore::Load() {
     std::wifstream file(path);
 
     if (!file.is_open()) {
-        settings_.pinnedApps = DefaultPins();
+        settings_.pinnedApps = NativeTaskbarPins();
+        if (settings_.pinnedApps.empty()) {
+            settings_.pinnedApps = DefaultPins();
+        }
         return Save();
     }
 
@@ -103,6 +217,11 @@ bool SettingsStore::Load() {
                 settings_.pinnedApps.push_back(std::move(app));
             }
         }
+    }
+
+    auto nativeTaskbarPins = NativeTaskbarPins();
+    if (!nativeTaskbarPins.empty()) {
+        settings_.pinnedApps = std::move(nativeTaskbarPins);
     }
 
     if (settings_.pinnedApps.empty()) {
