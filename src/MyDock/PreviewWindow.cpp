@@ -68,7 +68,7 @@ void PreviewWindow::ShowFor(const ApplicationGroup& app, const RECT& anchor) {
     const int rowCount = std::max(1, static_cast<int>(app_.windows.size()));
     const int height = kPadding * 2 + rowCount * kRowHeight;
     const int x = anchor.left;
-    const int y = std::max(0, anchor.top - height - 10);
+    const int y = std::max(0, static_cast<int>(anchor.top) - height - 10);
 
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, kPanelWidth, height, SWP_SHOWWINDOW);
     SetForegroundWindow(hwnd_);

@@ -47,7 +47,7 @@ D2D1_RECT_F RectF(float left, float top, float right, float bottom) {
     return D2D1::RectF(left, top, right, bottom);
 }
 
-RECT ToRect(const RECTF& rect) {
+RECT ToRect(const D2D1_RECT_F& rect) {
     return {
         static_cast<LONG>(std::floor(rect.left)),
         static_cast<LONG>(std::floor(rect.top)),

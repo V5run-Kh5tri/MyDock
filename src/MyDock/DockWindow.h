@@ -32,7 +32,7 @@ public:
 
 private:
     struct IconLayout {
-        RECTF bounds = {};
+        D2D1_RECT_F bounds = {};
         float scale = 1.0f;
     };
 

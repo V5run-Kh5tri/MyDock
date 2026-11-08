@@ -63,7 +63,7 @@ void SettingsWindow::ShowNear(const RECT& anchor) {
     }
 
     const int x = anchor.right - kWidth;
-    const int y = std::max(0, anchor.top - kHeight - 10);
+    const int y = std::max(0, static_cast<int>(anchor.top) - kHeight - 10);
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, kWidth, kHeight, SWP_SHOWWINDOW);
     SetForegroundWindow(hwnd_);
     InvalidateRect(hwnd_, nullptr, TRUE);
