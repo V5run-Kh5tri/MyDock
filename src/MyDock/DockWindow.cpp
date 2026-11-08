@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <sstream>
 
@@ -62,6 +64,18 @@ std::wstring FormatTwoDigits(int value) {
     return buffer;
 }
 
+void LogDock(const wchar_t* message) {
+    wchar_t tempPath[MAX_PATH] = {};
+    if (GetTempPathW(_countof(tempPath), tempPath) == 0) {
+        return;
+    }
+
+    std::wofstream log(std::filesystem::path(tempPath) / L"MyDock.log", std::ios::app);
+    if (log.is_open()) {
+        log << message << L"\n";
+    }
+}
+
 } // namespace
 
 DockWindow::DockWindow(
@@ -85,6 +99,8 @@ DockWindow::DockWindow(
       }) {}
 
 bool DockWindow::Create() {
+    LogDock(L"DockWindow::Create begin");
+
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
     wc.hInstance = instance_;
@@ -92,7 +108,11 @@ bool DockWindow::Create() {
     wc.lpszClassName = kDockClassName;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
-    RegisterClassExW(&wc);
+    const ATOM registered = RegisterClassExW(&wc);
+    if (registered == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        LogDock(L"RegisterClassExW failed");
+        return false;
+    }
 
     hwnd_ = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -109,6 +129,7 @@ bool DockWindow::Create() {
         this);
 
     if (!hwnd_) {
+        LogDock(L"CreateWindowExW dock failed");
         return false;
     }
 
@@ -134,8 +155,14 @@ bool DockWindow::Create() {
         SendMessageW(tooltip_, TTM_SETDELAYTIME, TTDT_INITIAL, 500);
     }
 
-    if (!previewWindow_.Create(hwnd_) || !settingsWindow_.Create(hwnd_)) {
-        return false;
+    previewAvailable_ = previewWindow_.Create(hwnd_);
+    if (!previewAvailable_) {
+        LogDock(L"PreviewWindow::Create failed; continuing without previews");
+    }
+
+    settingsAvailable_ = settingsWindow_.Create(hwnd_);
+    if (!settingsAvailable_) {
+        LogDock(L"SettingsWindow::Create failed; continuing without settings popup");
     }
 
     RefreshApplications();
@@ -144,13 +171,16 @@ bool DockWindow::Create() {
     SetTimer(hwnd_, kRefreshTimer, 1000, nullptr);
     SetTimer(hwnd_, kClockTimer, 1000, nullptr);
     SetTimer(hwnd_, kAutoHideTimer, 30, nullptr);
+    LogDock(L"DockWindow::Create complete");
     return true;
 }
 
 void DockWindow::Show() {
     PositionWindow(false);
-    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+    ShowWindow(hwnd_, SW_SHOW);
+    SetForegroundWindow(hwnd_);
     UpdateWindow(hwnd_);
+    RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
 }
 
 LRESULT CALLBACK DockWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -493,12 +523,14 @@ void DockWindow::PositionWindow(bool animate) {
 
 void DockWindow::Paint() {
     PAINTSTRUCT paint = {};
-    BeginPaint(hwnd_, &paint);
-    EndPaint(hwnd_, &paint);
+    HDC paintDc = BeginPaint(hwnd_, &paint);
 
     if (!CreateDeviceResources()) {
+        PaintFallback(paintDc);
+        EndPaint(hwnd_, &paint);
         return;
     }
+    EndPaint(hwnd_, &paint);
 
     renderTarget_->BeginDraw();
     renderTarget_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
@@ -512,6 +544,34 @@ void DockWindow::Paint() {
     }
 
     PaintIconsWithGdi();
+}
+
+void DockWindow::PaintFallback(HDC dc) {
+    if (!dc) {
+        return;
+    }
+
+    RECT client = {};
+    GetClientRect(hwnd_, &client);
+    HBRUSH background = CreateSolidBrush(RGB(32, 36, 42));
+    HPEN border = CreatePen(PS_SOLID, 1, RGB(130, 136, 148));
+    HFONT font = CreateFontW(
+        -16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+
+    SelectObject(dc, background);
+    SelectObject(dc, border);
+    RoundRect(dc, client.left, client.top, client.right, client.bottom, 28, 28);
+
+    SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(245, 247, 251));
+    DrawTextW(dc, L"MyDock", -1, &client, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    DeleteObject(font);
+    DeleteObject(border);
+    DeleteObject(background);
 }
 
 void DockWindow::PaintDockSurface() {
@@ -641,7 +701,11 @@ void DockWindow::HandleLeftClick(POINT point) {
     }
     if (systemButton == 2) {
         RECT anchor = WindowRect();
-        settingsWindow_.ShowNear(anchor);
+        if (settingsAvailable_) {
+            settingsWindow_.ShowNear(anchor);
+        } else {
+            ShellActions::OpenSettingsHome();
+        }
         return;
     }
 
@@ -671,7 +735,9 @@ void DockWindow::HandleRightClick(POINT point) {
 
     RECT anchor = ToRect(iconLayouts_[static_cast<size_t>(appIndex)].bounds);
     MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
-    previewWindow_.ShowFor(app, anchor);
+    if (previewAvailable_) {
+        previewWindow_.ShowFor(app, anchor);
+    }
 }
 
 void DockWindow::UpdateHover(POINT point) {

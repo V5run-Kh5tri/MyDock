@@ -47,6 +47,7 @@ private:
     void PositionWindow(bool animate);
     void Paint();
     void PaintDockSurface();
+    void PaintFallback(HDC dc);
     void PaintSystemSection();
     void PaintApplicationSection();
     void PaintIconsWithGdi();
@@ -95,6 +96,8 @@ private:
     std::wstring tooltipText_;
     bool mouseInside_ = false;
     bool hidden_ = false;
+    bool previewAvailable_ = false;
+    bool settingsAvailable_ = false;
     int currentY_ = 0;
     std::chrono::steady_clock::time_point lastInsideTime_ = std::chrono::steady_clock::now();
 };
