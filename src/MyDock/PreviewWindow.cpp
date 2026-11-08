@@ -94,7 +94,13 @@ LRESULT CALLBACK PreviewWindow::WindowProc(HWND hwnd, UINT message, WPARAM wPara
     if (message == WM_NCCREATE) {
         const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
         self = reinterpret_cast<PreviewWindow*>(create->lpCreateParams);
+        if (!self) {
+            return FALSE;
+        }
+
+        self->hwnd_ = hwnd;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        return TRUE;
     }
 
     return self ? self->HandleMessage(message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);

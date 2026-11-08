@@ -189,7 +189,13 @@ LRESULT CALLBACK DockWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, 
     if (message == WM_NCCREATE) {
         const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
         self = reinterpret_cast<DockWindow*>(create->lpCreateParams);
+        if (!self) {
+            return FALSE;
+        }
+
+        self->hwnd_ = hwnd;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        return TRUE;
     }
 
     return self ? self->HandleMessage(message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
