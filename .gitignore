@@ -1,0 +1,14 @@
+/.vs/
+/x64/
+/Debug/
+/Release/
+/src/**/x64/
+/src/**/Debug/
+/src/**/Release/
+*.user
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.VC.opendb
+
