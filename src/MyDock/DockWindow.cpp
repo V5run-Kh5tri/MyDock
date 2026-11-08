@@ -23,17 +23,21 @@ constexpr UINT_PTR kAutoHideTimer = 3;
 constexpr UINT_PTR kTooltipTimer = 4;
 constexpr UINT_PTR kAnimationTimer = 5;
 
-constexpr int kDockHeight = 92;
-constexpr int kSurfaceRadius = 23;
+constexpr int kWindowHeight = 106;
+constexpr int kSurfaceTop = 28;
+constexpr int kSurfaceHeight = 70;
+constexpr int kSurfaceBottom = kSurfaceTop + kSurfaceHeight;
+constexpr int kSurfaceRadius = 22;
 constexpr int kOuterPadding = 12;
 constexpr int kFixedSectionWidth = 188;
-constexpr int kBaseIconSize = 44;
-constexpr int kMaxIconSize = 70;
+constexpr int kBaseIconSize = 50;
+constexpr int kMaxIconSize = 80;
 constexpr int kIconGap = 10;
 constexpr int kVisibleBottomMargin = 12;
 constexpr int kHiddenVisibleSliver = 6;
 constexpr int kTooltipDelayMs = 725;
 constexpr float kAnimationEase = 0.24f;
+constexpr float kIconRestingBottom = 80.0f;
 
 constexpr DWORD kDwmAttributeSystemBackdropType = 38;
 constexpr DWORD kDwmBackdropTransientWindow = 3;
@@ -141,6 +145,8 @@ bool DockWindow::Create() {
 
     BOOL darkMode = TRUE;
     DwmSetWindowAttribute(hwnd_, 20, &darkMode, sizeof(darkMode));
+    MARGINS frameMargins = {-1, -1, -1, -1};
+    DwmExtendFrameIntoClientArea(hwnd_, &frameMargins);
     DWORD backdropType = kDwmBackdropTransientWindow;
     DwmSetWindowAttribute(hwnd_, kDwmAttributeSystemBackdropType, &backdropType, sizeof(backdropType));
     DWM_BLURBEHIND blurBehind = {};
@@ -333,10 +339,10 @@ bool DockWindow::CreateDeviceResources() {
             return false;
         }
 
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x141820, 0.74f), surfaceBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x5FA8FF, 0.15f), surfaceAccentBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.24f), surfaceShadowBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.34f), borderBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x18202A, 0.54f), surfaceBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x8FC8FF, 0.10f), surfaceAccentBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.18f), surfaceShadowBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.42f), borderBrush_.GetAddressOf());
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xF5F7FB, 0.98f), textBrush_.GetAddressOf());
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xBCC3CE, 0.88f), mutedBrush_.GetAddressOf());
 
@@ -456,7 +462,7 @@ void DockWindow::UpdateLayout(bool reposition) {
 
     for (size_t index = 0; index < applications_.size(); ++index) {
         const float scale = index < iconScales_.size() ? iconScales_[index] : 1.0f;
-        const float size = kBaseIconSize * scale;
+        const float size = std::min(static_cast<float>(kMaxIconSize), kBaseIconSize * scale);
         sizes.push_back(size);
         appWidth += size;
         if (index + 1 < applications_.size()) {
@@ -469,23 +475,22 @@ void DockWindow::UpdateLayout(bool reposition) {
     }
 
     const int targetWidth = static_cast<int>(std::ceil(kFixedSectionWidth + appWidth + kOuterPadding));
-    dockSize_ = {std::max(360, targetWidth), kDockHeight};
+    dockSize_ = {std::max(360, targetWidth), kWindowHeight};
 
     float x = static_cast<float>(kFixedSectionWidth + kOuterPadding);
-    const float centerY = 46.0f;
     for (size_t index = 0; index < applications_.size(); ++index) {
         const float size = sizes[index];
         IconLayout layout;
         layout.scale = size / kBaseIconSize;
-        layout.bounds = RectF(x, centerY - size / 2.0f, x + size, centerY + size / 2.0f);
+        layout.bounds = RectF(x, kIconRestingBottom - size, x + size, kIconRestingBottom);
         iconLayouts_.push_back(layout);
         x += size + kIconGap + (size - kBaseIconSize) * 0.22f;
     }
 
-    clockDateRect_ = {12, 18, 94, 70};
-    quickSettingsRect_ = {102, 28, 132, 58};
-    settingsRect_ = {142, 28, 172, 58};
-    dividerRect_ = {kFixedSectionWidth - 1, 18, kFixedSectionWidth, kDockHeight - 18};
+    clockDateRect_ = {12, kSurfaceTop + 8, 94, kSurfaceBottom - 8};
+    quickSettingsRect_ = {102, kSurfaceTop + 20, 132, kSurfaceTop + 50};
+    settingsRect_ = {142, kSurfaceTop + 20, 172, kSurfaceTop + 50};
+    dividerRect_ = {kFixedSectionWidth - 1, kSurfaceTop + 12, kFixedSectionWidth, kSurfaceBottom - 12};
 
     HRGN region = CreateRoundRectRgn(0, 0, dockSize_.cx + 1, dockSize_.cy + 1, kSurfaceRadius * 2, kSurfaceRadius * 2);
     SetWindowRgn(hwnd_, region, TRUE);
@@ -610,15 +615,15 @@ void DockWindow::PaintFallback(HDC dc) {
 }
 
 void DockWindow::PaintDockSurface() {
-    const auto rect = RectF(0.5f, 0.5f, static_cast<float>(dockSize_.cx) - 0.5f, static_cast<float>(dockSize_.cy) - 0.5f);
+    const auto rect = RectF(0.5f, static_cast<float>(kSurfaceTop), static_cast<float>(dockSize_.cx) - 0.5f, static_cast<float>(kSurfaceBottom));
     const auto rounded = D2D1::RoundedRect(rect, static_cast<float>(kSurfaceRadius), static_cast<float>(kSurfaceRadius));
-    const auto shadow = D2D1::RoundedRect(RectF(2.0f, 6.0f, static_cast<float>(dockSize_.cx) - 2.0f, static_cast<float>(dockSize_.cy) - 1.0f), static_cast<float>(kSurfaceRadius), static_cast<float>(kSurfaceRadius));
+    const auto shadow = D2D1::RoundedRect(RectF(2.0f, static_cast<float>(kSurfaceTop + 6), static_cast<float>(dockSize_.cx) - 2.0f, static_cast<float>(kSurfaceBottom + 5)), static_cast<float>(kSurfaceRadius), static_cast<float>(kSurfaceRadius));
     renderTarget_->FillRoundedRectangle(shadow, surfaceShadowBrush_.Get());
     renderTarget_->FillRoundedRectangle(rounded, surfaceBrush_.Get());
     renderTarget_->FillRoundedRectangle(rounded, surfaceAccentBrush_.Get());
     renderTarget_->DrawRoundedRectangle(rounded, borderBrush_.Get(), 1.0f);
 
-    const auto highlight = D2D1::RoundedRect(RectF(1.0f, 1.0f, static_cast<float>(dockSize_.cx) - 1.0f, 28.0f), 22.0f, 22.0f);
+    const auto highlight = D2D1::RoundedRect(RectF(1.0f, static_cast<float>(kSurfaceTop + 1), static_cast<float>(dockSize_.cx) - 1.0f, static_cast<float>(kSurfaceTop + 24)), 22.0f, 22.0f);
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> highlightBrush;
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.14f), highlightBrush.GetAddressOf());
     renderTarget_->FillRoundedRectangle(highlight, highlightBrush.Get());
@@ -632,14 +637,14 @@ void DockWindow::PaintSystemSection() {
         time.c_str(),
         static_cast<UINT32>(time.size()),
         timeFormat_.Get(),
-        RectF(14.0f, 22.0f, 90.0f, 43.0f),
+        RectF(14.0f, static_cast<float>(kSurfaceTop + 13), 90.0f, static_cast<float>(kSurfaceTop + 34)),
         textBrush_.Get());
 
     renderTarget_->DrawTextW(
         date.c_str(),
         static_cast<UINT32>(date.size()),
         dateFormat_.Get(),
-        RectF(14.0f, 45.0f, 90.0f, 66.0f),
+        RectF(14.0f, static_cast<float>(kSurfaceTop + 36), 90.0f, static_cast<float>(kSurfaceTop + 57)),
         mutedBrush_.Get());
 
     renderTarget_->DrawLine(
@@ -680,7 +685,7 @@ void DockWindow::PaintApplicationSection() {
 
         const float totalWidth = count * 8.0f + (count - 1) * 4.0f;
         float x = (layout.bounds.left + layout.bounds.right - totalWidth) / 2.0f;
-        const float y = 78.0f;
+        const float y = static_cast<float>(kSurfaceBottom - 12);
 
         for (int line = 0; line < count; ++line) {
             renderTarget_->FillRoundedRectangle(

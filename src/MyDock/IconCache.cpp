@@ -2,7 +2,9 @@
 
 #include <Shellapi.h>
 #include <ShlObj.h>
+#include <ShObjIdl.h>
 #include <Shlwapi.h>
+#include <wrl/client.h>
 
 #include <filesystem>
 #include <system_error>
@@ -53,6 +55,29 @@ std::wstring QueryAppPath(HKEY root, const std::wstring& executable) {
     return {};
 }
 
+std::wstring ResolveShortcutTarget(const std::wstring& shortcutPath) {
+    if (ToLower(std::filesystem::path(shortcutPath).extension().wstring()) != L".lnk") {
+        return {};
+    }
+
+    Microsoft::WRL::ComPtr<IShellLinkW> shellLink;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(shellLink.GetAddressOf())))) {
+        return {};
+    }
+
+    Microsoft::WRL::ComPtr<IPersistFile> persistFile;
+    if (FAILED(shellLink.As(&persistFile)) || FAILED(persistFile->Load(shortcutPath.c_str(), STGM_READ))) {
+        return {};
+    }
+
+    wchar_t target[MAX_PATH] = {};
+    if (FAILED(shellLink->GetPath(target, _countof(target), nullptr, SLGP_RAWPATH))) {
+        return {};
+    }
+
+    return target;
+}
+
 std::wstring ResolveIconSource(const ApplicationGroup& app) {
     std::vector<std::wstring> candidates = {
         app.iconPath,
@@ -75,11 +100,29 @@ std::wstring ResolveIconSource(const ApplicationGroup& app) {
         candidate = StripCommandArguments(candidate);
         std::error_code ec;
         if (!candidate.empty() && std::filesystem::exists(candidate, ec)) {
-            return candidate;
+            const auto shortcutTarget = ResolveShortcutTarget(candidate);
+            return shortcutTarget.empty() ? candidate : shortcutTarget;
         }
     }
 
     return StripCommandArguments(app.iconPath.empty() ? app.launchCommand : app.iconPath);
+}
+
+HICON ExtractIconFallback(const std::wstring& iconSource) {
+    if (iconSource.empty()) {
+        return nullptr;
+    }
+
+    HICON largeIcon = nullptr;
+    HICON smallIcon = nullptr;
+    if (ExtractIconExW(iconSource.c_str(), 0, &largeIcon, &smallIcon, 1) > 0) {
+        if (largeIcon && smallIcon) {
+            DestroyIcon(smallIcon);
+        }
+        return largeIcon ? largeIcon : smallIcon;
+    }
+
+    return nullptr;
 }
 
 } // namespace
@@ -103,6 +146,10 @@ HICON IconCache::IconFor(const ApplicationGroup& app) {
         if (SHGetFileInfoW(iconSource.c_str(), FILE_ATTRIBUTE_NORMAL, &fileInfo, sizeof(fileInfo), SHGFI_ICON | SHGFI_LARGEICON)) {
             icon = fileInfo.hIcon;
         }
+    }
+
+    if (!icon) {
+        icon = ExtractIconFallback(iconSource);
     }
 
     if (!icon) {

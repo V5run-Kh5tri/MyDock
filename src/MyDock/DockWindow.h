@@ -95,7 +95,7 @@ private:
     RECT quickSettingsRect_ = {};
     RECT settingsRect_ = {};
     RECT dividerRect_ = {};
-    SIZE dockSize_ = {560, 88};
+    SIZE dockSize_ = {560, 106};
     int hoverIndex_ = -1;
     int tooltipIndex_ = -1;
     HWND foregroundBeforeClick_ = nullptr;
