@@ -21,6 +21,7 @@ constexpr UINT_PTR kRefreshTimer = 1;
 constexpr UINT_PTR kClockTimer = 2;
 constexpr UINT_PTR kAutoHideTimer = 3;
 constexpr UINT_PTR kTooltipTimer = 4;
+constexpr UINT_PTR kAnimationTimer = 5;
 
 constexpr int kDockHeight = 92;
 constexpr int kSurfaceRadius = 23;
@@ -31,6 +32,11 @@ constexpr int kMaxIconSize = 70;
 constexpr int kIconGap = 10;
 constexpr int kVisibleBottomMargin = 12;
 constexpr int kHiddenVisibleSliver = 6;
+constexpr int kTooltipDelayMs = 725;
+constexpr float kAnimationEase = 0.24f;
+
+constexpr DWORD kDwmAttributeSystemBackdropType = 38;
+constexpr DWORD kDwmBackdropTransientWindow = 3;
 
 float ScaleForDistance(int distance) {
     switch (std::abs(distance)) {
@@ -135,6 +141,12 @@ bool DockWindow::Create() {
 
     BOOL darkMode = TRUE;
     DwmSetWindowAttribute(hwnd_, 20, &darkMode, sizeof(darkMode));
+    DWORD backdropType = kDwmBackdropTransientWindow;
+    DwmSetWindowAttribute(hwnd_, kDwmAttributeSystemBackdropType, &backdropType, sizeof(backdropType));
+    DWM_BLURBEHIND blurBehind = {};
+    blurBehind.dwFlags = DWM_BB_ENABLE;
+    blurBehind.fEnable = TRUE;
+    DwmEnableBlurBehindWindow(hwnd_, &blurBehind);
 
     tooltip_ = CreateWindowExW(
         WS_EX_TOPMOST,
@@ -171,6 +183,7 @@ bool DockWindow::Create() {
     SetTimer(hwnd_, kRefreshTimer, 1000, nullptr);
     SetTimer(hwnd_, kClockTimer, 1000, nullptr);
     SetTimer(hwnd_, kAutoHideTimer, 30, nullptr);
+    SetTimer(hwnd_, kAnimationTimer, 16, nullptr);
     LogDock(L"DockWindow::Create complete");
     return true;
 }
@@ -236,6 +249,9 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         UpdateLayout(true);
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
+    case WM_LBUTTONDOWN:
+        foregroundBeforeClick_ = GetAncestor(GetForegroundWindow(), GA_ROOT);
+        return 0;
     case WM_LBUTTONUP: {
         POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         HandleLeftClick(point);
@@ -265,6 +281,10 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             MaybeShowTooltip();
             return 0;
         }
+        if (wParam == kAnimationTimer) {
+            StepAnimation();
+            return 0;
+        }
         break;
     case WM_ERASEBKGND:
         return 1;
@@ -273,6 +293,7 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         KillTimer(hwnd_, kClockTimer);
         KillTimer(hwnd_, kAutoHideTimer);
         KillTimer(hwnd_, kTooltipTimer);
+        KillTimer(hwnd_, kAnimationTimer);
         DiscardDeviceResources();
         PostQuitMessage(0);
         return 0;
@@ -312,8 +333,10 @@ bool DockWindow::CreateDeviceResources() {
             return false;
         }
 
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x20242A, 0.86f), surfaceBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.28f), borderBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x141820, 0.74f), surfaceBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x5FA8FF, 0.15f), surfaceAccentBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.24f), surfaceShadowBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.34f), borderBrush_.GetAddressOf());
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xF5F7FB, 0.98f), textBrush_.GetAddressOf());
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xBCC3CE, 0.88f), mutedBrush_.GetAddressOf());
 
@@ -369,6 +392,8 @@ void DockWindow::DiscardDeviceResources() {
     mutedBrush_.Reset();
     textBrush_.Reset();
     borderBrush_.Reset();
+    surfaceShadowBrush_.Reset();
+    surfaceAccentBrush_.Reset();
     surfaceBrush_.Reset();
     renderTarget_.Reset();
 }
@@ -421,13 +446,16 @@ void DockWindow::MergeApplications(const std::vector<ApplicationGroup>& running)
 void DockWindow::UpdateLayout(bool reposition) {
     iconLayouts_.clear();
     iconLayouts_.reserve(applications_.size());
+    if (iconScales_.size() != applications_.size()) {
+        iconScales_.assign(applications_.size(), 1.0f);
+    }
 
     float appWidth = static_cast<float>(kOuterPadding);
     std::vector<float> sizes;
     sizes.reserve(applications_.size());
 
     for (size_t index = 0; index < applications_.size(); ++index) {
-        const float scale = hoverIndex_ >= 0 ? ScaleForDistance(static_cast<int>(index) - hoverIndex_) : 1.0f;
+        const float scale = index < iconScales_.size() ? iconScales_[index] : 1.0f;
         const float size = kBaseIconSize * scale;
         sizes.push_back(size);
         appWidth += size;
@@ -454,6 +482,7 @@ void DockWindow::UpdateLayout(bool reposition) {
         x += size + kIconGap + (size - kBaseIconSize) * 0.22f;
     }
 
+    clockDateRect_ = {12, 18, 94, 70};
     quickSettingsRect_ = {102, 28, 132, 58};
     settingsRect_ = {142, 28, 172, 58};
     dividerRect_ = {kFixedSectionWidth - 1, 18, kFixedSectionWidth, kDockHeight - 18};
@@ -583,12 +612,15 @@ void DockWindow::PaintFallback(HDC dc) {
 void DockWindow::PaintDockSurface() {
     const auto rect = RectF(0.5f, 0.5f, static_cast<float>(dockSize_.cx) - 0.5f, static_cast<float>(dockSize_.cy) - 0.5f);
     const auto rounded = D2D1::RoundedRect(rect, static_cast<float>(kSurfaceRadius), static_cast<float>(kSurfaceRadius));
+    const auto shadow = D2D1::RoundedRect(RectF(2.0f, 6.0f, static_cast<float>(dockSize_.cx) - 2.0f, static_cast<float>(dockSize_.cy) - 1.0f), static_cast<float>(kSurfaceRadius), static_cast<float>(kSurfaceRadius));
+    renderTarget_->FillRoundedRectangle(shadow, surfaceShadowBrush_.Get());
     renderTarget_->FillRoundedRectangle(rounded, surfaceBrush_.Get());
+    renderTarget_->FillRoundedRectangle(rounded, surfaceAccentBrush_.Get());
     renderTarget_->DrawRoundedRectangle(rounded, borderBrush_.Get(), 1.0f);
 
-    const auto highlight = D2D1::RoundedRect(RectF(1.0f, 1.0f, static_cast<float>(dockSize_.cx) - 1.0f, 22.0f), 22.0f, 22.0f);
+    const auto highlight = D2D1::RoundedRect(RectF(1.0f, 1.0f, static_cast<float>(dockSize_.cx) - 1.0f, 28.0f), 22.0f, 22.0f);
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> highlightBrush;
-    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.08f), highlightBrush.GetAddressOf());
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.14f), highlightBrush.GetAddressOf());
     renderTarget_->FillRoundedRectangle(highlight, highlightBrush.Get());
 }
 
@@ -679,6 +711,9 @@ void DockWindow::PaintIconsWithGdi() {
 }
 
 int DockWindow::HitTestSystemButton(POINT point) const {
+    if (PtInRect(&clockDateRect_, point)) {
+        return 3;
+    }
     if (PtInRect(&quickSettingsRect_, point)) {
         return 1;
     }
@@ -699,8 +734,40 @@ int DockWindow::HitTestApplication(POINT point) const {
     return -1;
 }
 
+void DockWindow::StepAnimation() {
+    if (iconScales_.size() != applications_.size()) {
+        iconScales_.assign(applications_.size(), 1.0f);
+    }
+
+    bool changed = false;
+    for (size_t index = 0; index < iconScales_.size(); ++index) {
+        const float target = hoverIndex_ >= 0 ? ScaleForDistance(static_cast<int>(index) - hoverIndex_) : 1.0f;
+        float& current = iconScales_[index];
+        const float delta = target - current;
+        if (std::abs(delta) < 0.01f) {
+            if (current != target) {
+                current = target;
+                changed = true;
+            }
+            continue;
+        }
+
+        current += delta * kAnimationEase;
+        changed = true;
+    }
+
+    if (changed) {
+        UpdateLayout(true);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
 void DockWindow::HandleLeftClick(POINT point) {
     const int systemButton = HitTestSystemButton(point);
+    if (systemButton == 3) {
+        ShellActions::OpenNotificationCenter();
+        return;
+    }
     if (systemButton == 1) {
         ShellActions::OpenQuickSettings();
         return;
@@ -722,7 +789,7 @@ void DockWindow::HandleLeftClick(POINT point) {
 
     const auto& app = applications_[static_cast<size_t>(appIndex)];
     if (!app.windows.empty()) {
-        ShellActions::ActivateWindow(app.windows.front().hwnd);
+        ShellActions::ToggleWindowState(app.windows.front().hwnd, foregroundBeforeClick_);
     } else {
         pinnedApps_.Launch(app);
     }
@@ -754,9 +821,8 @@ void DockWindow::UpdateHover(POINT point) {
         HideTooltip();
         KillTimer(hwnd_, kTooltipTimer);
         if (hoverIndex_ >= 0) {
-            SetTimer(hwnd_, kTooltipTimer, 550, nullptr);
+            SetTimer(hwnd_, kTooltipTimer, kTooltipDelayMs, nullptr);
         }
-        UpdateLayout(true);
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }

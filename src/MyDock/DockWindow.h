@@ -54,6 +54,7 @@ private:
 
     int HitTestSystemButton(POINT point) const;
     int HitTestApplication(POINT point) const;
+    void StepAnimation();
     void HandleLeftClick(POINT point);
     void HandleRightClick(POINT point);
     void UpdateHover(POINT point);
@@ -78,6 +79,8 @@ private:
     Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory_;
     Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> renderTarget_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> surfaceBrush_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> surfaceAccentBrush_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> surfaceShadowBrush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> borderBrush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> textBrush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> mutedBrush_;
@@ -87,12 +90,15 @@ private:
 
     std::vector<ApplicationGroup> applications_;
     std::vector<IconLayout> iconLayouts_;
+    std::vector<float> iconScales_;
+    RECT clockDateRect_ = {};
     RECT quickSettingsRect_ = {};
     RECT settingsRect_ = {};
     RECT dividerRect_ = {};
     SIZE dockSize_ = {560, 88};
     int hoverIndex_ = -1;
     int tooltipIndex_ = -1;
+    HWND foregroundBeforeClick_ = nullptr;
     std::wstring tooltipText_;
     bool mouseInside_ = false;
     bool hidden_ = false;
