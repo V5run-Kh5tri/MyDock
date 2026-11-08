@@ -8,6 +8,7 @@ void OpenQuickSettings();
 void OpenNotificationCenter();
 void OpenSettingsHome();
 void ActivateWindow(HWND hwnd);
+bool IsWindowActive(HWND hwnd);
 void ToggleWindowState(HWND hwnd);
 void ToggleWindowState(HWND hwnd, HWND activeWindow);
 

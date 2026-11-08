@@ -15,6 +15,34 @@ void SendWinShortcut(WORD key) {
 
 } // namespace
 
+bool IsWindowActive(HWND hwnd) {
+    if (!IsWindow(hwnd)) {
+        return false;
+    }
+
+    const HWND root = GetAncestor(hwnd, GA_ROOT);
+    const auto matches = [root](HWND candidate) {
+        return candidate && GetAncestor(candidate, GA_ROOT) == root;
+    };
+
+    if (matches(GetForegroundWindow())) {
+        return true;
+    }
+
+    GUITHREADINFO guiThreadInfo = {};
+    guiThreadInfo.cbSize = sizeof(guiThreadInfo);
+    if (GetGUIThreadInfo(0, &guiThreadInfo)) {
+        return matches(guiThreadInfo.hwndActive) ||
+               matches(guiThreadInfo.hwndFocus) ||
+               matches(guiThreadInfo.hwndCapture) ||
+               matches(guiThreadInfo.hwndMenuOwner) ||
+               matches(guiThreadInfo.hwndMoveSize) ||
+               matches(guiThreadInfo.hwndCaret);
+    }
+
+    return false;
+}
+
 void OpenQuickSettings() {
     SendWinShortcut('A');
 }
@@ -48,7 +76,8 @@ void ToggleWindowState(HWND hwnd, HWND activeWindow) {
         return;
     }
 
-    if (activeWindow == hwnd && !IsIconic(hwnd)) {
+    const bool isActive = (activeWindow && GetAncestor(activeWindow, GA_ROOT) == GetAncestor(hwnd, GA_ROOT)) || IsWindowActive(hwnd);
+    if (isActive && !IsIconic(hwnd)) {
         ShowWindow(hwnd, SW_MINIMIZE);
         return;
     }
