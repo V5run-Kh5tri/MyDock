@@ -38,9 +38,7 @@ constexpr int kHiddenVisibleSliver = 6;
 constexpr int kTooltipDelayMs = 725;
 constexpr float kAnimationEase = 0.24f;
 constexpr float kIconRestingBottom = 80.0f;
-
-constexpr DWORD kDwmAttributeSystemBackdropType = 38;
-constexpr DWORD kDwmBackdropTransientWindow = 3;
+constexpr COLORREF kTransparentKeyColor = 0x00030201;
 
 float ScaleForDistance(int distance) {
     switch (std::abs(distance)) {
@@ -126,7 +124,7 @@ bool DockWindow::Create() {
     }
 
     hwnd_ = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         kDockClassName,
         L"MyDock",
         WS_POPUP,
@@ -146,14 +144,7 @@ bool DockWindow::Create() {
 
     BOOL darkMode = TRUE;
     DwmSetWindowAttribute(hwnd_, 20, &darkMode, sizeof(darkMode));
-    MARGINS frameMargins = {-1, -1, -1, -1};
-    DwmExtendFrameIntoClientArea(hwnd_, &frameMargins);
-    DWORD backdropType = kDwmBackdropTransientWindow;
-    DwmSetWindowAttribute(hwnd_, kDwmAttributeSystemBackdropType, &backdropType, sizeof(backdropType));
-    DWM_BLURBEHIND blurBehind = {};
-    blurBehind.dwFlags = DWM_BB_ENABLE;
-    blurBehind.fEnable = TRUE;
-    DwmEnableBlurBehindWindow(hwnd_, &blurBehind);
+    SetLayeredWindowAttributes(hwnd_, kTransparentKeyColor, 0, LWA_COLORKEY);
 
     tooltip_ = CreateWindowExW(
         WS_EX_TOPMOST,
@@ -604,7 +595,7 @@ void DockWindow::Paint() {
     EndPaint(hwnd_, &paint);
 
     renderTarget_->BeginDraw();
-    renderTarget_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    renderTarget_->Clear(D2D1::ColorF(1.0f / 255.0f, 2.0f / 255.0f, 3.0f / 255.0f, 1.0f));
     PaintDockSurface();
     PaintSystemSection();
     PaintApplicationSection();
