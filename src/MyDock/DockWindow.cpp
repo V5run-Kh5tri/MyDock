@@ -37,20 +37,14 @@ constexpr int kVisibleBottomMargin = 12;
 constexpr int kHiddenVisibleSliver = 6;
 constexpr int kTooltipDelayMs = 725;
 constexpr float kAnimationEase = 0.24f;
+constexpr float kFocusEase = 0.34f;
 constexpr float kIconRestingBottom = 80.0f;
 constexpr COLORREF kTransparentKeyColor = 0x00030201;
 
-float ScaleForDistance(int distance) {
-    switch (std::abs(distance)) {
-    case 0:
-        return 1.58f;
-    case 1:
-        return 1.32f;
-    case 2:
-        return 1.12f;
-    default:
-        return 1.0f;
-    }
+float ScaleForDistance(float distance) {
+    const float normalized = std::min(std::abs(distance), 2.75f) / 2.75f;
+    const float influence = std::max(0.0f, 1.0f - normalized * normalized);
+    return 1.0f + 0.58f * influence * influence;
 }
 
 D2D1_RECT_F RectF(float left, float top, float right, float bottom) {
@@ -480,6 +474,10 @@ void DockWindow::MergeApplications(const std::vector<ApplicationGroup>& running)
     }
 
     applications_ = std::move(merged);
+    if (hoverIndex_ >= static_cast<int>(applications_.size())) {
+        hoverIndex_ = -1;
+        hoverFocus_ = -1.0f;
+    }
 }
 
 void DockWindow::UpdateLayout(bool reposition) {
@@ -816,8 +814,25 @@ void DockWindow::StepAnimation() {
     }
 
     bool changed = false;
+    const float targetFocus = hoverIndex_ >= 0 ? static_cast<float>(hoverIndex_) : -1.0f;
+    if (targetFocus >= 0.0f && hoverFocus_ < 0.0f) {
+        hoverFocus_ = targetFocus;
+        changed = true;
+    } else if (targetFocus >= 0.0f) {
+        const float focusDelta = targetFocus - hoverFocus_;
+        if (std::abs(focusDelta) < 0.015f) {
+            if (hoverFocus_ != targetFocus) {
+                hoverFocus_ = targetFocus;
+                changed = true;
+            }
+        } else {
+            hoverFocus_ += focusDelta * kFocusEase;
+            changed = true;
+        }
+    }
+
     for (size_t index = 0; index < iconScales_.size(); ++index) {
-        const float target = hoverIndex_ >= 0 ? ScaleForDistance(static_cast<int>(index) - hoverIndex_) : 1.0f;
+        const float target = hoverIndex_ >= 0 && hoverFocus_ >= 0.0f ? ScaleForDistance(static_cast<float>(index) - hoverFocus_) : 1.0f;
         float& current = iconScales_[index];
         const float delta = target - current;
         if (std::abs(delta) < 0.01f) {

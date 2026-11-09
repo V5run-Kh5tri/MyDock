@@ -100,6 +100,7 @@ private:
     std::vector<ApplicationGroup> applications_;
     std::vector<IconLayout> iconLayouts_;
     std::vector<float> iconScales_;
+    float hoverFocus_ = -1.0f;
     RECT clockDateRect_ = {};
     RECT quickSettingsRect_ = {};
     RECT settingsRect_ = {};
