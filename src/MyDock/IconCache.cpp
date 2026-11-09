@@ -96,6 +96,25 @@ void AddCandidate(std::vector<std::wstring>& candidates, std::set<std::wstring>&
     }
 }
 
+bool LooksLikeAppUserModelId(const std::wstring& value) {
+    return value.find(L'!') != std::wstring::npos &&
+           value.find(L'\\') == std::wstring::npos &&
+           value.find(L'/') == std::wstring::npos;
+}
+
+std::wstring AppsFolderPathFromAumid(const std::wstring& appUserModelId) {
+    if (!LooksLikeAppUserModelId(appUserModelId)) {
+        return {};
+    }
+
+    return L"shell:AppsFolder\\" + appUserModelId;
+}
+
+bool IsShellNamespacePath(const std::wstring& value) {
+    const auto lower = ToLower(value);
+    return lower.rfind(L"shell:", 0) == 0 || lower.rfind(L"::{", 0) == 0;
+}
+
 std::wstring SearchExecutableOnPath(const std::wstring& executable) {
     wchar_t buffer[MAX_PATH] = {};
     wchar_t* filePart = nullptr;
@@ -146,6 +165,7 @@ std::wstring ResolveShortcutTarget(const std::wstring& shortcutPath) {
 std::vector<std::wstring> ResolveIconSources(const ApplicationGroup& app) {
     std::vector<std::wstring> candidates;
     std::set<std::wstring> seen;
+    AddCandidate(candidates, seen, AppsFolderPathFromAumid(app.id));
     AddCandidate(candidates, seen, app.iconPath);
     AddCandidate(candidates, seen, app.launchCommand);
 
@@ -180,13 +200,23 @@ HICON IconFromShellItemImageFactory(const std::wstring& iconSource, int size) {
     }
 
     std::error_code ec;
-    if (!std::filesystem::exists(iconSource, ec)) {
+    if (!IsShellNamespacePath(iconSource) && !std::filesystem::exists(iconSource, ec)) {
         return nullptr;
     }
 
     Microsoft::WRL::ComPtr<IShellItem> item;
     if (FAILED(SHCreateItemFromParsingName(iconSource.c_str(), nullptr, IID_PPV_ARGS(item.GetAddressOf())))) {
-        return nullptr;
+        PIDLIST_ABSOLUTE itemIdList = nullptr;
+        SFGAOF attributes = 0;
+        if (FAILED(SHParseDisplayName(iconSource.c_str(), nullptr, &itemIdList, 0, &attributes)) || !itemIdList) {
+            return nullptr;
+        }
+
+        const HRESULT itemResult = SHCreateItemFromIDList(itemIdList, IID_PPV_ARGS(item.GetAddressOf()));
+        CoTaskMemFree(itemIdList);
+        if (FAILED(itemResult)) {
+            return nullptr;
+        }
     }
 
     Microsoft::WRL::ComPtr<IShellItemImageFactory> imageFactory;
