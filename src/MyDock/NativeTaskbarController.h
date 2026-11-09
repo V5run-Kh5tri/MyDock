@@ -23,12 +23,17 @@ private:
     std::vector<HWND> DiscoverTaskbarWindows() const;
     void HideTaskbarWindows();
     void RestoreTaskbarWindows();
+    void ReleaseWorkArea();
+    void RestoreWorkArea();
+    void RestorePersistedWorkArea();
     void Log(const wchar_t* message) const;
 
     HWND owner_ = nullptr;
     UINT taskbarCreatedMessage_ = 0;
     bool enabled_ = false;
     bool hotkeyRegistered_ = false;
+    bool workAreaChanged_ = false;
+    RECT originalWorkArea_ = {};
     std::map<HWND, bool> originalVisibility_;
 };
 

@@ -1,5 +1,7 @@
 #include "NativeTaskbarController.h"
 
+#include <ShlObj.h>
+
 #include <algorithm>
 #include <cwchar>
 #include <filesystem>
@@ -29,11 +31,64 @@ BOOL CALLBACK CollectTaskbarWindow(HWND hwnd, LPARAM lParam) {
     return TRUE;
 }
 
+std::filesystem::path RecoveryFilePath() {
+    PWSTR rawPath = nullptr;
+    std::filesystem::path root;
+
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE, nullptr, &rawPath))) {
+        root = rawPath;
+        CoTaskMemFree(rawPath);
+    }
+
+    if (root.empty()) {
+        root = std::filesystem::temp_directory_path();
+    }
+
+    return root / L"MyDock" / L"taskbar-workarea.txt";
+}
+
+void SaveRecoveryWorkArea(const RECT& rect) {
+    const auto path = RecoveryFilePath();
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+
+    std::wofstream file(path, std::ios::trunc);
+    if (file.is_open()) {
+        file << rect.left << L" " << rect.top << L" " << rect.right << L" " << rect.bottom << L"\n";
+    }
+}
+
+bool LoadRecoveryWorkArea(RECT* rect) {
+    if (!rect) {
+        return false;
+    }
+
+    std::wifstream file(RecoveryFilePath());
+    if (!file.is_open()) {
+        return false;
+    }
+
+    RECT loaded = {};
+    file >> loaded.left >> loaded.top >> loaded.right >> loaded.bottom;
+    if (!file || loaded.right <= loaded.left || loaded.bottom <= loaded.top) {
+        return false;
+    }
+
+    *rect = loaded;
+    return true;
+}
+
+void DeleteRecoveryWorkArea() {
+    std::error_code ec;
+    std::filesystem::remove(RecoveryFilePath(), ec);
+}
+
 } // namespace
 
 bool NativeTaskbarController::Initialize(HWND owner) {
     owner_ = owner;
     taskbarCreatedMessage_ = RegisterWindowMessageW(L"TaskbarCreated");
+    RestorePersistedWorkArea();
 
     hotkeyRegistered_ = RegisterHotKey(
                             owner_,
@@ -51,16 +106,19 @@ bool NativeTaskbarController::Initialize(HWND owner) {
 void NativeTaskbarController::ApplyEnabled(bool enabled) {
     if (enabled) {
         enabled_ = true;
+        ReleaseWorkArea();
         HideTaskbarWindows();
         return;
     }
 
     enabled_ = false;
     RestoreTaskbarWindows();
+    RestoreWorkArea();
 }
 
 void NativeTaskbarController::ReapplyIfEnabled() {
     if (enabled_) {
+        ReleaseWorkArea();
         HideTaskbarWindows();
     }
 }
@@ -68,12 +126,14 @@ void NativeTaskbarController::ReapplyIfEnabled() {
 void NativeTaskbarController::EmergencyRestore() {
     enabled_ = false;
     RestoreTaskbarWindows();
+    RestoreWorkArea();
     Log(L"Native taskbar restored by emergency hotkey");
 }
 
 void NativeTaskbarController::Shutdown() {
     enabled_ = false;
     RestoreTaskbarWindows();
+    RestoreWorkArea();
 
     if (hotkeyRegistered_ && owner_) {
         UnregisterHotKey(owner_, kRestoreHotkeyId);
@@ -127,6 +187,62 @@ void NativeTaskbarController::RestoreTaskbarWindows() {
     }
 
     originalVisibility_.clear();
+}
+
+void NativeTaskbarController::ReleaseWorkArea() {
+    if (!workAreaChanged_) {
+        if (LoadRecoveryWorkArea(&originalWorkArea_)) {
+            workAreaChanged_ = true;
+        } else if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &originalWorkArea_, 0)) {
+            SaveRecoveryWorkArea(originalWorkArea_);
+            workAreaChanged_ = true;
+        } else {
+            Log(L"SPI_GETWORKAREA failed before native taskbar replacement");
+            return;
+        }
+    }
+
+    POINT origin = {};
+    HMONITOR monitor = owner_ ? MonitorFromWindow(owner_, MONITOR_DEFAULTTOPRIMARY) : MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO monitorInfo = {};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!monitor || !GetMonitorInfoW(monitor, &monitorInfo)) {
+        Log(L"GetMonitorInfoW failed before native taskbar replacement");
+        return;
+    }
+
+    RECT fullWorkArea = monitorInfo.rcMonitor;
+    if (!SystemParametersInfoW(SPI_SETWORKAREA, 0, &fullWorkArea, SPIF_SENDCHANGE)) {
+        Log(L"SPI_SETWORKAREA failed during native taskbar replacement");
+    }
+}
+
+void NativeTaskbarController::RestoreWorkArea() {
+    if (!workAreaChanged_) {
+        return;
+    }
+
+    if (!SystemParametersInfoW(SPI_SETWORKAREA, 0, &originalWorkArea_, SPIF_SENDCHANGE)) {
+        Log(L"SPI_SETWORKAREA failed while restoring native taskbar work area");
+    }
+
+    DeleteRecoveryWorkArea();
+    originalWorkArea_ = {};
+    workAreaChanged_ = false;
+}
+
+void NativeTaskbarController::RestorePersistedWorkArea() {
+    RECT persisted = {};
+    if (!LoadRecoveryWorkArea(&persisted)) {
+        return;
+    }
+
+    if (!SystemParametersInfoW(SPI_SETWORKAREA, 0, &persisted, SPIF_SENDCHANGE)) {
+        Log(L"SPI_SETWORKAREA failed while restoring persisted taskbar work area");
+        return;
+    }
+
+    DeleteRecoveryWorkArea();
 }
 
 void NativeTaskbarController::Log(const wchar_t* message) const {

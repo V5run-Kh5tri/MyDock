@@ -51,7 +51,7 @@ private:
     void PaintFallback(HDC dc);
     void PaintSystemSection();
     void PaintApplicationSection();
-    void PaintIconsWithGdi();
+    void PaintIconsWithGdi(HDC dc);
     void ApplySettings();
     void RestoreNativeTaskbarEmergency();
 
