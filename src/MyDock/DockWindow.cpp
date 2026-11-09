@@ -346,6 +346,16 @@ bool DockWindow::CreateDeviceResources() {
         }
     }
 
+    if (!wicFactory_) {
+        if (FAILED(CoCreateInstance(
+                CLSID_WICImagingFactory,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(wicFactory_.GetAddressOf())))) {
+            return false;
+        }
+    }
+
     if (!renderTarget_) {
         RECT client = {};
         GetClientRect(hwnd_, &client);
@@ -423,6 +433,7 @@ void DockWindow::DiscardDeviceResources() {
     surfaceShadowBrush_.Reset();
     surfaceAccentBrush_.Reset();
     surfaceBrush_.Reset();
+    iconBitmaps_.clear();
     renderTarget_.Reset();
 }
 
@@ -599,13 +610,12 @@ void DockWindow::Paint() {
     PaintDockSurface();
     PaintSystemSection();
     PaintApplicationSection();
+    PaintIconsWithD2D();
     const HRESULT hr = renderTarget_->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         DiscardDeviceResources();
         return;
     }
-
-    PaintIconsWithGdi();
 }
 
 void DockWindow::PaintFallback(HDC dc) {
@@ -718,23 +728,62 @@ void DockWindow::PaintApplicationSection() {
     }
 }
 
-void DockWindow::PaintIconsWithGdi() {
-    HDC dc = GetDC(hwnd_);
-    if (!dc) {
+void DockWindow::PaintIconsWithD2D() {
+    if (!renderTarget_) {
         return;
     }
 
-    SetBkMode(dc, TRANSPARENT);
-
     for (size_t index = 0; index < applications_.size() && index < iconLayouts_.size(); ++index) {
-        const auto iconRect = ToRect(iconLayouts_[index].bounds);
-        const int width = iconRect.right - iconRect.left;
-        const int height = iconRect.bottom - iconRect.top;
         HICON icon = iconCache_.IconFor(applications_[index]);
-        DrawIconEx(dc, iconRect.left, iconRect.top, icon, width, height, 0, nullptr, DI_NORMAL);
+        ID2D1Bitmap* bitmap = BitmapForIcon(icon);
+        if (bitmap) {
+            renderTarget_->DrawBitmap(
+                bitmap,
+                iconLayouts_[index].bounds,
+                1.0f,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        }
+    }
+}
+
+ID2D1Bitmap* DockWindow::BitmapForIcon(HICON icon) {
+    if (!icon || !renderTarget_ || !wicFactory_) {
+        return nullptr;
     }
 
-    ReleaseDC(hwnd_, dc);
+    const auto existing = iconBitmaps_.find(icon);
+    if (existing != iconBitmaps_.end()) {
+        return existing->second.Get();
+    }
+
+    Microsoft::WRL::ComPtr<IWICBitmap> wicBitmap;
+    if (FAILED(wicFactory_->CreateBitmapFromHICON(icon, wicBitmap.GetAddressOf()))) {
+        return nullptr;
+    }
+
+    Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+    if (FAILED(wicFactory_->CreateFormatConverter(converter.GetAddressOf()))) {
+        return nullptr;
+    }
+
+    if (FAILED(converter->Initialize(
+            wicBitmap.Get(),
+            GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone,
+            nullptr,
+            0.0,
+            WICBitmapPaletteTypeMedianCut))) {
+        return nullptr;
+    }
+
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> d2dBitmap;
+    if (FAILED(renderTarget_->CreateBitmapFromWicBitmap(converter.Get(), nullptr, d2dBitmap.GetAddressOf()))) {
+        return nullptr;
+    }
+
+    ID2D1Bitmap* result = d2dBitmap.Get();
+    iconBitmaps_[icon] = std::move(d2dBitmap);
+    return result;
 }
 
 int DockWindow::HitTestSystemButton(POINT point) const {

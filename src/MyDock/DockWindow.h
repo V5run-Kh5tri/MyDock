@@ -10,9 +10,11 @@
 #include <CommCtrl.h>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <wincodec.h>
 #include <wrl/client.h>
 
 #include <chrono>
+#include <map>
 
 namespace MyDock {
 
@@ -51,9 +53,10 @@ private:
     void PaintFallback(HDC dc);
     void PaintSystemSection();
     void PaintApplicationSection();
-    void PaintIconsWithGdi();
+    void PaintIconsWithD2D();
     void ApplySettings();
     void RestoreNativeTaskbarEmergency();
+    ID2D1Bitmap* BitmapForIcon(HICON icon);
 
     int HitTestSystemButton(POINT point) const;
     int HitTestApplication(POINT point) const;
@@ -81,6 +84,7 @@ private:
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory_;
+    Microsoft::WRL::ComPtr<IWICImagingFactory> wicFactory_;
     Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> renderTarget_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> surfaceBrush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> surfaceAccentBrush_;
@@ -91,6 +95,7 @@ private:
     Microsoft::WRL::ComPtr<IDWriteTextFormat> timeFormat_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> dateFormat_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> iconFormat_;
+    std::map<HICON, Microsoft::WRL::ComPtr<ID2D1Bitmap>> iconBitmaps_;
 
     std::vector<ApplicationGroup> applications_;
     std::vector<IconLayout> iconLayouts_;
