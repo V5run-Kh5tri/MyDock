@@ -29,7 +29,9 @@ constexpr int kSurfaceHeight = 70;
 constexpr int kSurfaceBottom = kSurfaceTop + kSurfaceHeight;
 constexpr int kSurfaceRadius = 22;
 constexpr int kOuterPadding = 12;
-constexpr int kFixedSectionWidth = 188;
+constexpr int kSystemSectionWidth = 188;
+constexpr int kStartSearchSectionWidth = 46;
+constexpr int kFixedSectionWidth = kSystemSectionWidth + kStartSearchSectionWidth;
 constexpr int kBaseIconSize = 50;
 constexpr int kMaxIconSize = 80;
 constexpr int kIconGap = 10;
@@ -521,7 +523,8 @@ void DockWindow::UpdateLayout(bool reposition) {
     clockDateRect_ = {12, kSurfaceTop + 8, 94, kSurfaceBottom - 8};
     quickSettingsRect_ = {102, kSurfaceTop + 20, 132, kSurfaceTop + 50};
     settingsRect_ = {142, kSurfaceTop + 20, 172, kSurfaceTop + 50};
-    dividerRect_ = {kFixedSectionWidth - 1, kSurfaceTop + 12, kFixedSectionWidth, kSurfaceBottom - 12};
+    startSearchRect_ = {kSystemSectionWidth + 8, kSurfaceTop + 20, kSystemSectionWidth + 38, kSurfaceTop + 50};
+    dividerRect_ = {kSystemSectionWidth - 1, kSurfaceTop + 12, kSystemSectionWidth, kSurfaceBottom - 12};
 
     HRGN region = CreateRoundRectRgn(0, 0, dockSize_.cx + 1, dockSize_.cy + 1, kSurfaceRadius * 2, kSurfaceRadius * 2);
     SetWindowRgn(hwnd_, region, TRUE);
@@ -683,6 +686,16 @@ void DockWindow::PaintSystemSection() {
         borderBrush_.Get(),
         1.0f);
 
+    const auto searchCenter = D2D1::Point2F(
+        (startSearchRect_.left + startSearchRect_.right) / 2.0f - 2.0f,
+        (startSearchRect_.top + startSearchRect_.bottom) / 2.0f - 2.0f);
+    renderTarget_->DrawEllipse(D2D1::Ellipse(searchCenter, 7.5f, 7.5f), mutedBrush_.Get(), 2.0f);
+    renderTarget_->DrawLine(
+        D2D1::Point2F(searchCenter.x + 5.5f, searchCenter.y + 5.5f),
+        D2D1::Point2F(searchCenter.x + 11.5f, searchCenter.y + 11.5f),
+        mutedBrush_.Get(),
+        2.0f);
+
     const auto monitorOuter = RectF(quickSettingsRect_.left + 5.0f, quickSettingsRect_.top + 6.0f, quickSettingsRect_.right - 5.0f, quickSettingsRect_.bottom - 8.0f);
     renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(monitorOuter, 3.0f, 3.0f), mutedBrush_.Get(), 1.8f);
     renderTarget_->DrawLine(
@@ -794,6 +807,9 @@ int DockWindow::HitTestSystemButton(POINT point) const {
     if (PtInRect(&settingsRect_, point)) {
         return 2;
     }
+    if (PtInRect(&startSearchRect_, point)) {
+        return 4;
+    }
     return 0;
 }
 
@@ -870,6 +886,10 @@ void DockWindow::HandleLeftClick(POINT point) {
         } else {
             ShellActions::OpenSettingsHome();
         }
+        return;
+    }
+    if (systemButton == 4) {
+        ShellActions::OpenStartMenu();
         return;
     }
 

@@ -104,6 +104,7 @@ private:
     RECT clockDateRect_ = {};
     RECT quickSettingsRect_ = {};
     RECT settingsRect_ = {};
+    RECT startSearchRect_ = {};
     RECT dividerRect_ = {};
     SIZE dockSize_ = {560, 106};
     int hoverIndex_ = -1;

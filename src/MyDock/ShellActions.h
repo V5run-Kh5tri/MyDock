@@ -6,6 +6,7 @@ namespace MyDock::ShellActions {
 
 void OpenQuickSettings();
 void OpenNotificationCenter();
+void OpenStartMenu();
 void OpenSettingsHome();
 void ActivateWindow(HWND hwnd);
 bool IsWindowActive(HWND hwnd);

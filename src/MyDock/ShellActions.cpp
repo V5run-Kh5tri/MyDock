@@ -13,6 +13,11 @@ void SendWinShortcut(WORD key) {
     keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
 }
 
+void SendKeyPress(WORD key) {
+    keybd_event(static_cast<BYTE>(key), 0, 0, 0);
+    keybd_event(static_cast<BYTE>(key), 0, KEYEVENTF_KEYUP, 0);
+}
+
 } // namespace
 
 bool IsWindowActive(HWND hwnd) {
@@ -49,6 +54,10 @@ void OpenQuickSettings() {
 
 void OpenNotificationCenter() {
     SendWinShortcut('N');
+}
+
+void OpenStartMenu() {
+    SendKeyPress(VK_LWIN);
 }
 
 void OpenSettingsHome() {
