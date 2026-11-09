@@ -523,7 +523,7 @@ void DockWindow::UpdateLayout(bool reposition) {
     clockDateRect_ = {12, kSurfaceTop + 8, 94, kSurfaceBottom - 8};
     quickSettingsRect_ = {102, kSurfaceTop + 20, 132, kSurfaceTop + 50};
     settingsRect_ = {142, kSurfaceTop + 20, 172, kSurfaceTop + 50};
-    startSearchRect_ = {kFixedSectionWidth - 38, kSurfaceTop + 20, kFixedSectionWidth - 8, kSurfaceTop + 50};
+    startSearchRect_ = {kSystemSectionWidth, kSurfaceTop + 20, kSystemSectionWidth + 30, kSurfaceTop + 50};
     dividerRect_ = {kFixedSectionWidth - 1, kSurfaceTop + 12, kFixedSectionWidth, kSurfaceBottom - 12};
 
     HRGN region = CreateRoundRectRgn(0, 0, dockSize_.cx + 1, dockSize_.cy + 1, kSurfaceRadius * 2, kSurfaceRadius * 2);
