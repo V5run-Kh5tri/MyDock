@@ -11,6 +11,7 @@ namespace MyDock {
 namespace {
 
 constexpr int kRestoreHotkeyId = 0x4D54;
+constexpr UINT kWorkAreaChangeFlags = SPIF_UPDATEINIFILE | SPIF_SENDCHANGE;
 
 bool IsTaskbarWindow(HWND hwnd) {
     wchar_t className[80] = {};
@@ -28,6 +29,39 @@ BOOL CALLBACK CollectTaskbarWindow(HWND hwnd, LPARAM lParam) {
         windows->push_back(hwnd);
     }
 
+    return TRUE;
+}
+
+struct MaximizedRefreshState {
+    HWND owner = nullptr;
+    HMONITOR monitor = nullptr;
+};
+
+bool IsRefreshCandidate(HWND hwnd, const MaximizedRefreshState& state) {
+    if (!hwnd || hwnd == state.owner || !IsWindowVisible(hwnd) || !IsZoomed(hwnd)) {
+        return false;
+    }
+
+    if (IsTaskbarWindow(hwnd) || GetAncestor(hwnd, GA_ROOT) != hwnd || GetWindow(hwnd, GW_OWNER) != nullptr) {
+        return false;
+    }
+
+    const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if ((exStyle & WS_EX_TOOLWINDOW) != 0) {
+        return false;
+    }
+
+    return MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) == state.monitor;
+}
+
+BOOL CALLBACK RefreshMaximizedWindow(HWND hwnd, LPARAM lParam) {
+    const auto* state = reinterpret_cast<const MaximizedRefreshState*>(lParam);
+    if (!state || !IsRefreshCandidate(hwnd, *state)) {
+        return TRUE;
+    }
+
+    ShowWindow(hwnd, SW_RESTORE);
+    ShowWindow(hwnd, SW_MAXIMIZE);
     return TRUE;
 }
 
@@ -212,9 +246,17 @@ void NativeTaskbarController::ReleaseWorkArea() {
     }
 
     RECT fullWorkArea = monitorInfo.rcMonitor;
-    if (!SystemParametersInfoW(SPI_SETWORKAREA, 0, &fullWorkArea, SPIF_SENDCHANGE)) {
-        Log(L"SPI_SETWORKAREA failed during native taskbar replacement");
+    RECT currentWorkArea = {};
+    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &currentWorkArea, 0) && EqualRect(&currentWorkArea, &fullWorkArea)) {
+        return;
     }
+
+    if (!SystemParametersInfoW(SPI_SETWORKAREA, 0, &fullWorkArea, kWorkAreaChangeFlags)) {
+        Log(L"SPI_SETWORKAREA failed during native taskbar replacement");
+        return;
+    }
+
+    RefreshMaximizedWindows();
 }
 
 void NativeTaskbarController::RestoreWorkArea() {
@@ -222,8 +264,16 @@ void NativeTaskbarController::RestoreWorkArea() {
         return;
     }
 
-    if (!SystemParametersInfoW(SPI_SETWORKAREA, 0, &originalWorkArea_, SPIF_SENDCHANGE)) {
+    RECT currentWorkArea = {};
+    const bool alreadyRestored = SystemParametersInfoW(SPI_GETWORKAREA, 0, &currentWorkArea, 0) &&
+                                 EqualRect(&currentWorkArea, &originalWorkArea_);
+    if (!alreadyRestored && !SystemParametersInfoW(SPI_SETWORKAREA, 0, &originalWorkArea_, kWorkAreaChangeFlags)) {
         Log(L"SPI_SETWORKAREA failed while restoring native taskbar work area");
+        return;
+    }
+
+    if (!alreadyRestored) {
+        RefreshMaximizedWindows();
     }
 
     DeleteRecoveryWorkArea();
@@ -237,12 +287,27 @@ void NativeTaskbarController::RestorePersistedWorkArea() {
         return;
     }
 
-    if (!SystemParametersInfoW(SPI_SETWORKAREA, 0, &persisted, SPIF_SENDCHANGE)) {
+    if (!SystemParametersInfoW(SPI_SETWORKAREA, 0, &persisted, kWorkAreaChangeFlags)) {
         Log(L"SPI_SETWORKAREA failed while restoring persisted taskbar work area");
         return;
     }
 
     DeleteRecoveryWorkArea();
+}
+
+void NativeTaskbarController::RefreshMaximizedWindows() {
+    if (!owner_) {
+        return;
+    }
+
+    MaximizedRefreshState state;
+    state.owner = owner_;
+    state.monitor = MonitorFromWindow(owner_, MONITOR_DEFAULTTONEAREST);
+    if (!state.monitor) {
+        return;
+    }
+
+    EnumWindows(RefreshMaximizedWindow, reinterpret_cast<LPARAM>(&state));
 }
 
 void NativeTaskbarController::Log(const wchar_t* message) const {
