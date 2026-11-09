@@ -3,6 +3,7 @@
 #include <ShlObj.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,7 @@ namespace {
 
 constexpr int kRestoreHotkeyId = 0x4D54;
 constexpr UINT kWorkAreaChangeFlags = SPIF_UPDATEINIFILE | SPIF_SENDCHANGE;
+constexpr auto kAggressiveSuppressDuration = std::chrono::seconds(6);
 
 bool IsTaskbarWindow(HWND hwnd) {
     wchar_t className[80] = {};
@@ -29,6 +31,12 @@ BOOL CALLBACK CollectTaskbarWindow(HWND hwnd, LPARAM lParam) {
         windows->push_back(hwnd);
     }
 
+    return TRUE;
+}
+
+BOOL CALLBACK CollectChildWindow(HWND hwnd, LPARAM lParam) {
+    auto* windows = reinterpret_cast<std::vector<HWND>*>(lParam);
+    windows->push_back(hwnd);
     return TRUE;
 }
 
@@ -140,18 +148,25 @@ bool NativeTaskbarController::Initialize(HWND owner) {
 void NativeTaskbarController::ApplyEnabled(bool enabled) {
     if (enabled) {
         enabled_ = true;
+        aggressiveSuppressUntil_ = std::chrono::steady_clock::now() + kAggressiveSuppressDuration;
         ReleaseWorkArea();
         HideTaskbarWindows();
         return;
     }
 
     enabled_ = false;
+    aggressiveSuppressUntil_ = {};
     RestoreTaskbarWindows();
     RestoreWorkArea();
 }
 
 void NativeTaskbarController::ReapplyIfEnabled() {
     if (enabled_) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now > aggressiveSuppressUntil_) {
+            aggressiveSuppressUntil_ = {};
+        }
+
         ReleaseWorkArea();
         HideTaskbarWindows();
     }
@@ -159,6 +174,7 @@ void NativeTaskbarController::ReapplyIfEnabled() {
 
 void NativeTaskbarController::EmergencyRestore() {
     enabled_ = false;
+    aggressiveSuppressUntil_ = {};
     RestoreTaskbarWindows();
     RestoreWorkArea();
     Log(L"Native taskbar restored by emergency hotkey");
@@ -166,6 +182,7 @@ void NativeTaskbarController::EmergencyRestore() {
 
 void NativeTaskbarController::Shutdown() {
     enabled_ = false;
+    aggressiveSuppressUntil_ = {};
     RestoreTaskbarWindows();
     RestoreWorkArea();
 
@@ -180,7 +197,9 @@ bool NativeTaskbarController::IsTaskbarCreatedMessage(UINT message) const {
 }
 
 void NativeTaskbarController::OnTaskbarCreated() {
-    originalVisibility_.clear();
+    originalWindowState_.clear();
+    originalWindowOrder_.clear();
+    aggressiveSuppressUntil_ = std::chrono::steady_clock::now() + kAggressiveSuppressDuration;
     ReapplyIfEnabled();
 }
 
@@ -190,6 +209,16 @@ bool NativeTaskbarController::IsRestoreHotkey(WPARAM id) const {
 
 std::vector<HWND> NativeTaskbarController::DiscoverTaskbarWindows() const {
     std::vector<HWND> windows;
+
+    if (HWND primary = FindWindowW(L"Shell_TrayWnd", nullptr)) {
+        windows.push_back(primary);
+    }
+
+    HWND secondary = nullptr;
+    while ((secondary = FindWindowExW(nullptr, secondary, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr) {
+        windows.push_back(secondary);
+    }
+
     EnumWindows(CollectTaskbarWindow, reinterpret_cast<LPARAM>(&windows));
 
     std::vector<HWND> uniqueWindows;
@@ -202,25 +231,98 @@ std::vector<HWND> NativeTaskbarController::DiscoverTaskbarWindows() const {
     return uniqueWindows;
 }
 
-void NativeTaskbarController::HideTaskbarWindows() {
-    for (const HWND hwnd : DiscoverTaskbarWindows()) {
-        if (originalVisibility_.find(hwnd) == originalVisibility_.end()) {
-            originalVisibility_[hwnd] = IsWindowVisible(hwnd) != FALSE;
+std::vector<HWND> NativeTaskbarController::DiscoverTaskbarWindowTree() const {
+    std::vector<HWND> windows;
+    for (const HWND taskbar : DiscoverTaskbarWindows()) {
+        if (!taskbar || !IsWindow(taskbar)) {
+            continue;
         }
 
-        ShowWindow(hwnd, SW_HIDE);
+        windows.push_back(taskbar);
+        EnumChildWindows(taskbar, CollectChildWindow, reinterpret_cast<LPARAM>(&windows));
+    }
+
+    std::vector<HWND> uniqueWindows;
+    for (const HWND hwnd : windows) {
+        if (hwnd && IsWindow(hwnd) && std::find(uniqueWindows.begin(), uniqueWindows.end(), hwnd) == uniqueWindows.end()) {
+            uniqueWindows.push_back(hwnd);
+        }
+    }
+
+    return uniqueWindows;
+}
+
+void NativeTaskbarController::RememberWindowState(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd) || originalWindowState_.find(hwnd) != originalWindowState_.end()) {
+        return;
+    }
+
+    WindowSnapshot snapshot;
+    snapshot.visible = IsWindowVisible(hwnd) != FALSE;
+    snapshot.enabled = IsWindowEnabled(hwnd) != FALSE;
+    originalWindowState_[hwnd] = snapshot;
+    originalWindowOrder_.push_back(hwnd);
+}
+
+void NativeTaskbarController::HideTaskbarWindows() {
+    const bool aggressive = enabled_ && std::chrono::steady_clock::now() <= aggressiveSuppressUntil_;
+    const auto windows = DiscoverTaskbarWindowTree();
+    if (windows.empty()) {
+        Log(L"No native taskbar windows discovered during suppression");
+        return;
+    }
+
+    for (const HWND hwnd : windows) {
+        RememberWindowState(hwnd);
+
+        if (aggressive || IsWindowVisible(hwnd)) {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+
+        if (aggressive) {
+            EnableWindow(hwnd, FALSE);
+            SetWindowPos(
+                hwnd,
+                HWND_BOTTOM,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_HIDEWINDOW);
+        }
     }
 }
 
 void NativeTaskbarController::RestoreTaskbarWindows() {
-    for (const HWND hwnd : DiscoverTaskbarWindows()) {
-        const auto previous = originalVisibility_.find(hwnd);
-        if (previous == originalVisibility_.end() || previous->second) {
-            ShowWindow(hwnd, SW_SHOW);
+    for (auto iter = originalWindowOrder_.rbegin(); iter != originalWindowOrder_.rend(); ++iter) {
+        const HWND hwnd = *iter;
+        const auto state = originalWindowState_.find(hwnd);
+        if (state == originalWindowState_.end()) {
+            continue;
+        }
+
+        if (!hwnd || !IsWindow(hwnd)) {
+            continue;
+        }
+
+        EnableWindow(hwnd, state->second.enabled);
+        if (state->second.visible) {
+            SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        } else {
+            ShowWindow(hwnd, SW_HIDE);
         }
     }
 
-    originalVisibility_.clear();
+    originalWindowState_.clear();
+    originalWindowOrder_.clear();
 }
 
 void NativeTaskbarController::ReleaseWorkArea() {

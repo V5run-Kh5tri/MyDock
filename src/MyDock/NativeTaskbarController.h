@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <chrono>
 #include <map>
 #include <vector>
 
@@ -20,7 +21,14 @@ public:
     bool IsRestoreHotkey(WPARAM id) const;
 
 private:
+    struct WindowSnapshot {
+        bool visible = false;
+        bool enabled = true;
+    };
+
     std::vector<HWND> DiscoverTaskbarWindows() const;
+    std::vector<HWND> DiscoverTaskbarWindowTree() const;
+    void RememberWindowState(HWND hwnd);
     void HideTaskbarWindows();
     void RestoreTaskbarWindows();
     void ReleaseWorkArea();
@@ -35,7 +43,9 @@ private:
     bool hotkeyRegistered_ = false;
     bool workAreaChanged_ = false;
     RECT originalWorkArea_ = {};
-    std::map<HWND, bool> originalVisibility_;
+    std::chrono::steady_clock::time_point aggressiveSuppressUntil_ = {};
+    std::map<HWND, WindowSnapshot> originalWindowState_;
+    std::vector<HWND> originalWindowOrder_;
 };
 
 } // namespace MyDock
