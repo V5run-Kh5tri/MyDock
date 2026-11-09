@@ -155,9 +155,7 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
         if (launchCommand.empty()) {
             launchCommand = shortcut.wstring();
         }
-        if (iconPath.empty()) {
-            iconPath = launchCommand;
-        }
+        iconPath = shortcut.wstring();
 
         PinnedAppDefinition app;
         app.displayName = ShortcutDisplayName(shortcut);

@@ -7,6 +7,7 @@
 #include <wrl/client.h>
 
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <system_error>
 #include <utility>
@@ -14,6 +15,23 @@
 
 namespace MyDock {
 namespace {
+
+void LogIconFallback(const ApplicationGroup& app, const std::vector<std::wstring>& iconSources) {
+    wchar_t tempPath[MAX_PATH] = {};
+    if (GetTempPathW(_countof(tempPath), tempPath) == 0) {
+        return;
+    }
+
+    std::wofstream log(std::filesystem::path(tempPath) / L"MyDock-icons.log", std::ios::app);
+    if (!log.is_open()) {
+        return;
+    }
+
+    log << L"Fallback icon for: " << app.displayName << L" [" << app.id << L"]\n";
+    for (const auto& source : iconSources) {
+        log << L"  source: " << source << L"\n";
+    }
+}
 
 std::wstring ExpandEnvironment(std::wstring value) {
     if (value.empty()) {
@@ -41,6 +59,11 @@ std::wstring StripCommandArguments(std::wstring command) {
         return {};
     }
 
+    std::error_code ec;
+    if (std::filesystem::exists(ExpandEnvironment(command), ec)) {
+        return command;
+    }
+
     if (command.front() == L'"') {
         const auto endQuote = command.find(L'"', 1);
         if (endQuote != std::wstring::npos) {
@@ -49,7 +72,16 @@ std::wstring StripCommandArguments(std::wstring command) {
     }
 
     const auto firstSpace = command.find(L' ');
-    return firstSpace == std::wstring::npos ? command : command.substr(0, firstSpace);
+    if (firstSpace == std::wstring::npos) {
+        return command;
+    }
+
+    const std::wstring possiblePath = command.substr(0, firstSpace);
+    if (std::filesystem::exists(ExpandEnvironment(possiblePath), ec)) {
+        return possiblePath;
+    }
+
+    return command;
 }
 
 void AddCandidate(std::vector<std::wstring>& candidates, std::set<std::wstring>& seen, std::wstring candidate) {
@@ -253,6 +285,7 @@ HICON IconCache::IconFor(const ApplicationGroup& app) {
 
     HICON icon = ResolveIcon(iconSources);
     if (!icon) {
+        LogIconFallback(app, iconSources);
         icon = LoadIconW(nullptr, IDI_APPLICATION);
     }
 
