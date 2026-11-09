@@ -7,12 +7,33 @@
 #include <wrl/client.h>
 
 #include <filesystem>
+#include <set>
 #include <system_error>
 #include <utility>
 #include <vector>
 
 namespace MyDock {
 namespace {
+
+std::wstring ExpandEnvironment(std::wstring value) {
+    if (value.empty()) {
+        return {};
+    }
+
+    DWORD required = ExpandEnvironmentStringsW(value.c_str(), nullptr, 0);
+    if (required == 0) {
+        return value;
+    }
+
+    std::wstring expanded(required, L'\0');
+    DWORD written = ExpandEnvironmentStringsW(value.c_str(), expanded.data(), required);
+    if (written == 0 || written > required) {
+        return value;
+    }
+
+    expanded.resize(written - 1);
+    return expanded;
+}
 
 std::wstring StripCommandArguments(std::wstring command) {
     command = Trim(std::move(command));
@@ -29,6 +50,18 @@ std::wstring StripCommandArguments(std::wstring command) {
 
     const auto firstSpace = command.find(L' ');
     return firstSpace == std::wstring::npos ? command : command.substr(0, firstSpace);
+}
+
+void AddCandidate(std::vector<std::wstring>& candidates, std::set<std::wstring>& seen, std::wstring candidate) {
+    candidate = ExpandEnvironment(StripCommandArguments(std::move(candidate)));
+    if (candidate.empty()) {
+        return;
+    }
+
+    const auto key = ToLower(candidate);
+    if (seen.insert(key).second) {
+        candidates.push_back(std::move(candidate));
+    }
 }
 
 std::wstring SearchExecutableOnPath(const std::wstring& executable) {
@@ -78,37 +111,94 @@ std::wstring ResolveShortcutTarget(const std::wstring& shortcutPath) {
     return target;
 }
 
-std::wstring ResolveIconSource(const ApplicationGroup& app) {
-    std::vector<std::wstring> candidates = {
-        app.iconPath,
-        app.launchCommand,
-    };
+std::vector<std::wstring> ResolveIconSources(const ApplicationGroup& app) {
+    std::vector<std::wstring> candidates;
+    std::set<std::wstring> seen;
+    AddCandidate(candidates, seen, app.iconPath);
+    AddCandidate(candidates, seen, app.launchCommand);
 
     const std::wstring executableName = BasenameFromPath(StripCommandArguments(app.launchCommand));
     if (!executableName.empty()) {
-        candidates.push_back(SearchExecutableOnPath(executableName));
-        candidates.push_back(QueryAppPath(HKEY_CURRENT_USER, executableName));
-        candidates.push_back(QueryAppPath(HKEY_LOCAL_MACHINE, executableName));
+        AddCandidate(candidates, seen, SearchExecutableOnPath(executableName));
+        AddCandidate(candidates, seen, QueryAppPath(HKEY_CURRENT_USER, executableName));
+        AddCandidate(candidates, seen, QueryAppPath(HKEY_LOCAL_MACHINE, executableName));
 
         wchar_t windowsDirectory[MAX_PATH] = {};
         if (GetWindowsDirectoryW(windowsDirectory, _countof(windowsDirectory)) > 0) {
-            candidates.push_back((std::filesystem::path(windowsDirectory) / executableName).wstring());
+            AddCandidate(candidates, seen, (std::filesystem::path(windowsDirectory) / executableName).wstring());
         }
     }
 
-    for (auto candidate : candidates) {
-        candidate = StripCommandArguments(candidate);
+    const size_t initialCount = candidates.size();
+    for (size_t index = 0; index < initialCount; ++index) {
+        const auto& candidate = candidates[index];
         std::error_code ec;
         if (!candidate.empty() && std::filesystem::exists(candidate, ec)) {
             const auto shortcutTarget = ResolveShortcutTarget(candidate);
-            return shortcutTarget.empty() ? candidate : shortcutTarget;
+            AddCandidate(candidates, seen, shortcutTarget);
         }
     }
 
-    return StripCommandArguments(app.iconPath.empty() ? app.launchCommand : app.iconPath);
+    return candidates;
 }
 
-HICON ExtractIconFallback(const std::wstring& iconSource) {
+HICON IconFromShellItemImageFactory(const std::wstring& iconSource, int size) {
+    if (iconSource.empty()) {
+        return nullptr;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(iconSource, ec)) {
+        return nullptr;
+    }
+
+    Microsoft::WRL::ComPtr<IShellItem> item;
+    if (FAILED(SHCreateItemFromParsingName(iconSource.c_str(), nullptr, IID_PPV_ARGS(item.GetAddressOf())))) {
+        return nullptr;
+    }
+
+    Microsoft::WRL::ComPtr<IShellItemImageFactory> imageFactory;
+    if (FAILED(item.As(&imageFactory))) {
+        return nullptr;
+    }
+
+    HBITMAP bitmap = nullptr;
+    SIZE requestedSize = {size, size};
+    const auto flags = static_cast<SIIGBF>(SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK);
+    if (FAILED(imageFactory->GetImage(requestedSize, flags, &bitmap)) || !bitmap) {
+        return nullptr;
+    }
+
+    BITMAP bitmapInfo = {};
+    GetObjectW(bitmap, sizeof(bitmapInfo), &bitmapInfo);
+    HBITMAP mask = CreateBitmap(bitmapInfo.bmWidth, bitmapInfo.bmHeight, 1, 1, nullptr);
+    ICONINFO iconInfo = {};
+    iconInfo.fIcon = TRUE;
+    iconInfo.hbmColor = bitmap;
+    iconInfo.hbmMask = mask;
+
+    HICON icon = CreateIconIndirect(&iconInfo);
+    if (mask) {
+        DeleteObject(mask);
+    }
+    DeleteObject(bitmap);
+    return icon;
+}
+
+HICON IconFromShellFileInfo(const std::wstring& iconSource) {
+    if (iconSource.empty()) {
+        return nullptr;
+    }
+
+    SHFILEINFOW fileInfo = {};
+    if (SHGetFileInfoW(iconSource.c_str(), FILE_ATTRIBUTE_NORMAL, &fileInfo, sizeof(fileInfo), SHGFI_ICON | SHGFI_LARGEICON)) {
+        return fileInfo.hIcon;
+    }
+
+    return nullptr;
+}
+
+HICON IconFromExtractIcon(const std::wstring& iconSource) {
     if (iconSource.empty()) {
         return nullptr;
     }
@@ -125,6 +215,28 @@ HICON ExtractIconFallback(const std::wstring& iconSource) {
     return nullptr;
 }
 
+HICON ResolveIcon(const std::vector<std::wstring>& iconSources) {
+    for (const auto& iconSource : iconSources) {
+        if (HICON icon = IconFromShellItemImageFactory(iconSource, 256)) {
+            return icon;
+        }
+    }
+
+    for (const auto& iconSource : iconSources) {
+        if (HICON icon = IconFromShellFileInfo(iconSource)) {
+            return icon;
+        }
+    }
+
+    for (const auto& iconSource : iconSources) {
+        if (HICON icon = IconFromExtractIcon(iconSource)) {
+            return icon;
+        }
+    }
+
+    return nullptr;
+}
+
 } // namespace
 
 IconCache::~IconCache() {
@@ -132,26 +244,14 @@ IconCache::~IconCache() {
 }
 
 HICON IconCache::IconFor(const ApplicationGroup& app) {
-    const std::wstring iconSource = ResolveIconSource(app);
-    const std::wstring key = ToLower(iconSource.empty() ? app.id : iconSource);
+    const auto iconSources = ResolveIconSources(app);
+    const std::wstring key = ToLower(!iconSources.empty() ? iconSources.front() : app.id);
     const auto existing = icons_.find(key);
     if (existing != icons_.end()) {
         return existing->second;
     }
 
-    SHFILEINFOW fileInfo = {};
-    HICON icon = nullptr;
-
-    if (!iconSource.empty()) {
-        if (SHGetFileInfoW(iconSource.c_str(), FILE_ATTRIBUTE_NORMAL, &fileInfo, sizeof(fileInfo), SHGFI_ICON | SHGFI_LARGEICON)) {
-            icon = fileInfo.hIcon;
-        }
-    }
-
-    if (!icon) {
-        icon = ExtractIconFallback(iconSource);
-    }
-
+    HICON icon = ResolveIcon(iconSources);
     if (!icon) {
         icon = LoadIconW(nullptr, IDI_APPLICATION);
     }
