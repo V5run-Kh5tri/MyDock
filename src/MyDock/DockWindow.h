@@ -51,7 +51,7 @@ private:
     void PaintFallback(HDC dc);
     void PaintSystemSection();
     void PaintApplicationSection();
-    void PaintIconsWithGdi();
+    void PaintIconsWithGdi(HDC dc);
     void ApplySettings();
     void RestoreNativeTaskbarEmergency();
 
@@ -108,7 +108,6 @@ private:
     bool hidden_ = false;
     bool previewAvailable_ = false;
     bool settingsAvailable_ = false;
-    bool regionApplied_ = false;
     int currentY_ = 0;
     std::chrono::steady_clock::time_point lastInsideTime_ = std::chrono::steady_clock::now();
 };

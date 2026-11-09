@@ -26,7 +26,6 @@ private:
     void ReleaseWorkArea();
     void RestoreWorkArea();
     void RestorePersistedWorkArea();
-    void RefreshMaximizedWindows();
     void Log(const wchar_t* message) const;
 
     HWND owner_ = nullptr;

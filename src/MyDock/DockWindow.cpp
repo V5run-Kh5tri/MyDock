@@ -39,6 +39,7 @@ constexpr int kTooltipDelayMs = 725;
 constexpr float kAnimationEase = 0.24f;
 constexpr float kIconRestingBottom = 80.0f;
 constexpr COLORREF kTransparentKeyColor = 0x00030201;
+const D2D1_COLOR_F kTransparentKeyD2DColor = D2D1::ColorF(1.0f / 255.0f, 2.0f / 255.0f, 3.0f / 255.0f, 1.0f);
 
 float ScaleForDistance(int distance) {
     switch (std::abs(distance)) {
@@ -478,25 +479,16 @@ void DockWindow::UpdateLayout(bool reposition) {
         iconScales_.assign(applications_.size(), 1.0f);
     }
 
+    float appWidth = static_cast<float>(kOuterPadding);
     std::vector<float> sizes;
-    std::vector<float> widthSizes;
     sizes.reserve(applications_.size());
-    widthSizes.reserve(applications_.size());
 
     for (size_t index = 0; index < applications_.size(); ++index) {
         const float scale = index < iconScales_.size() ? iconScales_[index] : 1.0f;
         const float size = std::min(static_cast<float>(kMaxIconSize), kBaseIconSize * scale);
         sizes.push_back(size);
-
-        const float widthScale = hoverIndex_ >= 0 ? ScaleForDistance(static_cast<int>(index) - hoverIndex_) : 1.0f;
-        widthSizes.push_back(std::min(static_cast<float>(kMaxIconSize), kBaseIconSize * widthScale));
-    }
-
-    float appWidth = static_cast<float>(kOuterPadding);
-    for (size_t index = 0; index < widthSizes.size(); ++index) {
-        const float size = widthSizes[index];
         appWidth += size;
-        if (index + 1 < widthSizes.size()) {
+        if (index + 1 < applications_.size()) {
             appWidth += kIconGap + (size - kBaseIconSize) * 0.22f;
         }
     }
@@ -506,9 +498,7 @@ void DockWindow::UpdateLayout(bool reposition) {
     }
 
     const int targetWidth = static_cast<int>(std::ceil(kFixedSectionWidth + appWidth + kOuterPadding));
-    const SIZE previousDockSize = dockSize_;
     dockSize_ = {std::max(360, targetWidth), kWindowHeight};
-    const bool sizeChanged = dockSize_.cx != previousDockSize.cx || dockSize_.cy != previousDockSize.cy;
 
     float x = static_cast<float>(kFixedSectionWidth + kOuterPadding);
     for (size_t index = 0; index < applications_.size(); ++index) {
@@ -525,28 +515,20 @@ void DockWindow::UpdateLayout(bool reposition) {
     settingsRect_ = {142, kSurfaceTop + 20, 172, kSurfaceTop + 50};
     dividerRect_ = {kFixedSectionWidth - 1, kSurfaceTop + 12, kFixedSectionWidth, kSurfaceBottom - 12};
 
-    if (sizeChanged || !regionApplied_) {
-        HRGN region = CreateRoundRectRgn(0, 0, dockSize_.cx + 1, dockSize_.cy + 1, kSurfaceRadius * 2, kSurfaceRadius * 2);
-        SetWindowRgn(hwnd_, region, TRUE);
-        regionApplied_ = true;
-    }
+    SetWindowPos(
+        hwnd_,
+        HWND_TOPMOST,
+        0,
+        0,
+        dockSize_.cx,
+        dockSize_.cy,
+        SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 
-    if (sizeChanged) {
-        SetWindowPos(
-            hwnd_,
-            HWND_TOPMOST,
-            0,
-            0,
-            dockSize_.cx,
-            dockSize_.cy,
-            SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-    }
-
-    if (renderTarget_ && sizeChanged) {
+    if (renderTarget_) {
         renderTarget_->Resize(D2D1::SizeU(dockSize_.cx, dockSize_.cy));
     }
 
-    if (reposition && sizeChanged) {
+    if (reposition) {
         PositionWindow(false);
     }
 }
@@ -608,20 +590,21 @@ void DockWindow::Paint() {
         EndPaint(hwnd_, &paint);
         return;
     }
-    EndPaint(hwnd_, &paint);
 
     renderTarget_->BeginDraw();
-    renderTarget_->Clear(D2D1::ColorF(1.0f / 255.0f, 2.0f / 255.0f, 3.0f / 255.0f, 1.0f));
+    renderTarget_->Clear(kTransparentKeyD2DColor);
     PaintDockSurface();
     PaintSystemSection();
     PaintApplicationSection();
     const HRESULT hr = renderTarget_->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         DiscardDeviceResources();
+        EndPaint(hwnd_, &paint);
         return;
     }
 
-    PaintIconsWithGdi();
+    PaintIconsWithGdi(paintDc);
+    EndPaint(hwnd_, &paint);
 }
 
 void DockWindow::PaintFallback(HDC dc) {
@@ -734,8 +717,7 @@ void DockWindow::PaintApplicationSection() {
     }
 }
 
-void DockWindow::PaintIconsWithGdi() {
-    HDC dc = GetDC(hwnd_);
+void DockWindow::PaintIconsWithGdi(HDC dc) {
     if (!dc) {
         return;
     }
@@ -749,8 +731,6 @@ void DockWindow::PaintIconsWithGdi() {
         HICON icon = iconCache_.IconFor(applications_[index]);
         DrawIconEx(dc, iconRect.left, iconRect.top, icon, width, height, 0, nullptr, DI_NORMAL);
     }
-
-    ReleaseDC(hwnd_, dc);
 }
 
 int DockWindow::HitTestSystemButton(POINT point) const {
