@@ -10,6 +10,9 @@ class SettingsStore {
 public:
     bool Load();
     bool Save() const;
+    bool RefreshPinnedAppsFromNativeTaskbar();
+    bool PinApp(const ApplicationGroup& app);
+    bool UnpinApp(const ApplicationGroup& app);
 
     Settings& Current() {
         return settings_;
@@ -22,8 +25,12 @@ public:
     std::filesystem::path SettingsPath() const;
 
 private:
+    void RebuildPinnedApps(std::vector<PinnedAppDefinition> nativeTaskbarPins);
+
     Settings settings_;
+    std::vector<PinnedAppDefinition> manualPinnedApps_;
+    std::vector<std::wstring> hiddenNativePinIds_;
+    std::vector<PinnedAppDefinition> legacyPinnedApps_;
 };
 
 } // namespace MyDock
-

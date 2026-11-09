@@ -162,6 +162,30 @@ std::wstring ResolveShortcutTarget(const std::wstring& shortcutPath) {
     return target;
 }
 
+std::wstring ResolveShortcutIconLocation(const std::wstring& shortcutPath) {
+    if (ToLower(std::filesystem::path(shortcutPath).extension().wstring()) != L".lnk") {
+        return {};
+    }
+
+    Microsoft::WRL::ComPtr<IShellLinkW> shellLink;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(shellLink.GetAddressOf())))) {
+        return {};
+    }
+
+    Microsoft::WRL::ComPtr<IPersistFile> persistFile;
+    if (FAILED(shellLink.As(&persistFile)) || FAILED(persistFile->Load(shortcutPath.c_str(), STGM_READ))) {
+        return {};
+    }
+
+    wchar_t iconLocation[MAX_PATH] = {};
+    int iconIndex = 0;
+    if (FAILED(shellLink->GetIconLocation(iconLocation, _countof(iconLocation), &iconIndex)) || iconLocation[0] == L'\0') {
+        return {};
+    }
+
+    return iconLocation;
+}
+
 std::vector<std::wstring> ResolveIconSources(const ApplicationGroup& app) {
     std::vector<std::wstring> candidates;
     std::set<std::wstring> seen;
@@ -186,6 +210,9 @@ std::vector<std::wstring> ResolveIconSources(const ApplicationGroup& app) {
         const auto& candidate = candidates[index];
         std::error_code ec;
         if (!candidate.empty() && std::filesystem::exists(candidate, ec)) {
+            const auto shortcutIcon = ResolveShortcutIconLocation(candidate);
+            AddCandidate(candidates, seen, shortcutIcon);
+
             const auto shortcutTarget = ResolveShortcutTarget(candidate);
             AddCandidate(candidates, seen, shortcutTarget);
         }
@@ -226,7 +253,8 @@ HICON IconFromShellItemImageFactory(const std::wstring& iconSource, int size) {
 
     HBITMAP bitmap = nullptr;
     SIZE requestedSize = {size, size};
-    const auto flags = static_cast<SIIGBF>(SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK);
+    constexpr auto kShellImageScaleUp = static_cast<SIIGBF>(0x00000100);
+    const auto flags = static_cast<SIIGBF>(SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK | kShellImageScaleUp);
     if (FAILED(imageFactory->GetImage(requestedSize, flags, &bitmap)) || !bitmap) {
         return nullptr;
     }
@@ -245,6 +273,24 @@ HICON IconFromShellItemImageFactory(const std::wstring& iconSource, int size) {
     }
     DeleteObject(bitmap);
     return icon;
+}
+
+HICON IconFromImageFile(const std::wstring& iconSource, int size) {
+    if (iconSource.empty()) {
+        return nullptr;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(iconSource, ec)) {
+        return nullptr;
+    }
+
+    const auto extension = ToLower(std::filesystem::path(iconSource).extension().wstring());
+    if (extension != L".ico") {
+        return nullptr;
+    }
+
+    return static_cast<HICON>(LoadImageW(nullptr, iconSource.c_str(), IMAGE_ICON, size, size, LR_LOADFROMFILE));
 }
 
 HICON IconFromShellFileInfo(const std::wstring& iconSource) {
@@ -280,6 +326,12 @@ HICON IconFromExtractIcon(const std::wstring& iconSource) {
 HICON ResolveIcon(const std::vector<std::wstring>& iconSources) {
     for (const auto& iconSource : iconSources) {
         if (HICON icon = IconFromShellItemImageFactory(iconSource, 256)) {
+            return icon;
+        }
+    }
+
+    for (const auto& iconSource : iconSources) {
+        if (HICON icon = IconFromImageFile(iconSource, 256)) {
             return icon;
         }
     }

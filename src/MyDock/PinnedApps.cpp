@@ -17,6 +17,18 @@ void PinnedApps::EnsureDefaults() {
     }
 }
 
+bool PinnedApps::Refresh() {
+    return settingsStore_.RefreshPinnedAppsFromNativeTaskbar();
+}
+
+bool PinnedApps::Pin(const ApplicationGroup& app) {
+    return settingsStore_.PinApp(app);
+}
+
+bool PinnedApps::Unpin(const ApplicationGroup& app) {
+    return settingsStore_.UnpinApp(app);
+}
+
 bool PinnedApps::Launch(const ApplicationGroup& app) const {
     if (app.launchCommand.empty()) {
         return false;
@@ -29,4 +41,3 @@ bool PinnedApps::Launch(const ApplicationGroup& app) const {
 }
 
 } // namespace MyDock
-

@@ -11,6 +11,9 @@ public:
 
     const std::vector<PinnedAppDefinition>& Apps() const;
     void EnsureDefaults();
+    bool Refresh();
+    bool Pin(const ApplicationGroup& app);
+    bool Unpin(const ApplicationGroup& app);
     bool Launch(const ApplicationGroup& app) const;
 
 private:
@@ -18,4 +21,3 @@ private:
 };
 
 } // namespace MyDock
-

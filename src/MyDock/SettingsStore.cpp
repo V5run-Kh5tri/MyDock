@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <system_error>
 #include <utility>
@@ -44,6 +45,48 @@ std::vector<std::wstring> Split(const std::wstring& line, wchar_t delimiter) {
     }
 
     return values;
+}
+
+bool SamePinnedApps(const std::vector<PinnedAppDefinition>& left, const std::vector<PinnedAppDefinition>& right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+
+    for (size_t index = 0; index < left.size(); ++index) {
+        if (ToLower(left[index].id) != ToLower(right[index].id) ||
+            left[index].displayName != right[index].displayName ||
+            left[index].launchCommand != right[index].launchCommand ||
+            left[index].iconPath != right[index].iconPath) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ContainsId(const std::vector<std::wstring>& ids, const std::wstring& id) {
+    const auto normalized = ToLower(id);
+    return std::any_of(ids.begin(), ids.end(), [&normalized](const auto& candidate) {
+        return ToLower(candidate) == normalized;
+    });
+}
+
+void RemoveId(std::vector<std::wstring>& ids, const std::wstring& id) {
+    const auto normalized = ToLower(id);
+    ids.erase(
+        std::remove_if(ids.begin(), ids.end(), [&normalized](const auto& candidate) {
+            return ToLower(candidate) == normalized;
+        }),
+        ids.end());
+}
+
+PinnedAppDefinition DefinitionFromGroup(const ApplicationGroup& app) {
+    PinnedAppDefinition definition;
+    definition.id = ToLower(app.id.empty() ? IdentityFromExecutable(app.launchCommand) : app.id);
+    definition.displayName = app.displayName;
+    definition.launchCommand = app.launchCommand;
+    definition.iconPath = app.iconPath.empty() ? app.launchCommand : app.iconPath;
+    return definition;
 }
 
 PinnedAppDefinition MakePinned(
@@ -155,7 +198,9 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
         if (launchCommand.empty()) {
             launchCommand = shortcut.wstring();
         }
-        iconPath = !appUserModelId.empty() ? L"shell:AppsFolder\\" + appUserModelId : shortcut.wstring();
+        if (iconPath.empty()) {
+            iconPath = shortcut.wstring();
+        }
 
         PinnedAppDefinition app;
         app.displayName = ShortcutDisplayName(shortcut);
@@ -175,15 +220,15 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
 
 bool SettingsStore::Load() {
     settings_ = {};
+    manualPinnedApps_.clear();
+    hiddenNativePinIds_.clear();
+    legacyPinnedApps_.clear();
 
     const auto path = SettingsPath();
     std::wifstream file(path);
 
     if (!file.is_open()) {
-        settings_.pinnedApps = NativeTaskbarPins();
-        if (settings_.pinnedApps.empty()) {
-            settings_.pinnedApps = DefaultPins();
-        }
+        RebuildPinnedApps(NativeTaskbarPins());
         return Save();
     }
 
@@ -206,7 +251,11 @@ bool SettingsStore::Load() {
             settings_.autoHide = value == L"1" || ToLower(value) == L"true";
         } else if (key == L"replacenativetaskbar") {
             settings_.replaceNativeTaskbar = value == L"1" || ToLower(value) == L"true";
-        } else if (key == L"pin") {
+        } else if (key == L"hiddennativepin") {
+            if (!value.empty()) {
+                hiddenNativePinIds_.push_back(ToLower(value));
+            }
+        } else if (key == L"pin" || key == L"manualpin") {
             auto fields = Split(value, L'|');
             if (fields.size() >= 3) {
                 PinnedAppDefinition app;
@@ -214,20 +263,16 @@ bool SettingsStore::Load() {
                 app.id = fields[1].empty() ? IdentityFromExecutable(fields[2]) : ToLower(fields[1]);
                 app.launchCommand = fields[2];
                 app.iconPath = fields.size() >= 4 && !fields[3].empty() ? fields[3] : fields[2];
-                settings_.pinnedApps.push_back(std::move(app));
+                if (key == L"manualpin") {
+                    manualPinnedApps_.push_back(std::move(app));
+                } else {
+                    legacyPinnedApps_.push_back(std::move(app));
+                }
             }
         }
     }
 
-    auto nativeTaskbarPins = NativeTaskbarPins();
-    if (!nativeTaskbarPins.empty()) {
-        settings_.pinnedApps = std::move(nativeTaskbarPins);
-    }
-
-    if (settings_.pinnedApps.empty()) {
-        settings_.pinnedApps = DefaultPins();
-    }
-
+    RebuildPinnedApps(NativeTaskbarPins());
     return true;
 }
 
@@ -245,14 +290,95 @@ bool SettingsStore::Save() const {
     file << L"autoHide=" << (settings_.autoHide ? L"1" : L"0") << L"\n";
     file << L"replaceNativeTaskbar=" << (settings_.replaceNativeTaskbar ? L"1" : L"0") << L"\n";
 
-    for (const auto& app : settings_.pinnedApps) {
-        file << L"pin=" << app.displayName << L"|"
+    for (const auto& id : hiddenNativePinIds_) {
+        file << L"hiddenNativePin=" << ToLower(id) << L"\n";
+    }
+
+    for (const auto& app : manualPinnedApps_) {
+        file << L"manualPin=" << app.displayName << L"|"
              << ToLower(app.id) << L"|"
              << app.launchCommand << L"|"
              << app.iconPath << L"\n";
     }
 
     return true;
+}
+
+bool SettingsStore::RefreshPinnedAppsFromNativeTaskbar() {
+    const auto previous = settings_.pinnedApps;
+    RebuildPinnedApps(NativeTaskbarPins());
+    return !SamePinnedApps(previous, settings_.pinnedApps);
+}
+
+bool SettingsStore::PinApp(const ApplicationGroup& app) {
+    auto definition = DefinitionFromGroup(app);
+    if (definition.id.empty()) {
+        return false;
+    }
+
+    RemoveId(hiddenNativePinIds_, definition.id);
+
+    const auto existing = std::find_if(manualPinnedApps_.begin(), manualPinnedApps_.end(), [&definition](const auto& pinned) {
+        return ToLower(pinned.id) == definition.id;
+    });
+
+    if (existing == manualPinnedApps_.end()) {
+        manualPinnedApps_.push_back(std::move(definition));
+    }
+
+    RebuildPinnedApps(NativeTaskbarPins());
+    return Save();
+}
+
+bool SettingsStore::UnpinApp(const ApplicationGroup& app) {
+    const auto id = ToLower(app.id.empty() ? IdentityFromExecutable(app.launchCommand) : app.id);
+    if (id.empty()) {
+        return false;
+    }
+
+    manualPinnedApps_.erase(
+        std::remove_if(manualPinnedApps_.begin(), manualPinnedApps_.end(), [&id](const auto& pinned) {
+            return ToLower(pinned.id) == id;
+        }),
+        manualPinnedApps_.end());
+
+    if (!ContainsId(hiddenNativePinIds_, id)) {
+        hiddenNativePinIds_.push_back(id);
+    }
+
+    RebuildPinnedApps(NativeTaskbarPins());
+    return Save();
+}
+
+void SettingsStore::RebuildPinnedApps(std::vector<PinnedAppDefinition> nativeTaskbarPins) {
+    std::vector<PinnedAppDefinition> merged;
+    std::map<std::wstring, bool> represented;
+
+    for (auto& app : nativeTaskbarPins) {
+        app.id = ToLower(app.id);
+        if (app.id.empty() || ContainsId(hiddenNativePinIds_, app.id)) {
+            continue;
+        }
+
+        represented[app.id] = true;
+        merged.push_back(std::move(app));
+    }
+
+    for (auto app : manualPinnedApps_) {
+        app.id = ToLower(app.id);
+        if (app.id.empty() || represented.find(app.id) != represented.end()) {
+            continue;
+        }
+
+        represented[app.id] = true;
+        merged.push_back(std::move(app));
+    }
+
+    if (merged.empty() && nativeTaskbarPins.empty() && manualPinnedApps_.empty() && hiddenNativePinIds_.empty()) {
+        merged = legacyPinnedApps_.empty() ? DefaultPins() : legacyPinnedApps_;
+    }
+
+    settings_.pinnedApps = std::move(merged);
 }
 
 std::filesystem::path SettingsStore::SettingsPath() const {

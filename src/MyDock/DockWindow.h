@@ -63,6 +63,7 @@ private:
     void StepAnimation();
     void HandleLeftClick(POINT point);
     void HandleRightClick(POINT point);
+    void ShowApplicationMenu(int appIndex, POINT point);
     void UpdateHover(POINT point);
     void HideTooltip();
     void MaybeShowTooltip();

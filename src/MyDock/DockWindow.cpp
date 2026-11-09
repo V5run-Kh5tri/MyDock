@@ -12,6 +12,7 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <vector>
 
 namespace MyDock {
 namespace {
@@ -22,6 +23,11 @@ constexpr UINT_PTR kClockTimer = 2;
 constexpr UINT_PTR kAutoHideTimer = 3;
 constexpr UINT_PTR kTooltipTimer = 4;
 constexpr UINT_PTR kAnimationTimer = 5;
+constexpr UINT kMenuOpenOrNewWindow = 1001;
+constexpr UINT kMenuShowWindows = 1002;
+constexpr UINT kMenuCloseWindow = 1003;
+constexpr UINT kMenuCloseAllWindows = 1004;
+constexpr UINT kMenuPinToggle = 1005;
 
 constexpr int kWindowHeight = 106;
 constexpr int kSurfaceTop = 28;
@@ -60,6 +66,71 @@ RECT ToRect(const D2D1_RECT_F& rect) {
         static_cast<LONG>(std::ceil(rect.right)),
         static_cast<LONG>(std::ceil(rect.bottom)),
     };
+}
+
+bool ContentBounds(IWICBitmapSource* source, WICRect& bounds) {
+    if (!source) {
+        return false;
+    }
+
+    UINT width = 0;
+    UINT height = 0;
+    if (FAILED(source->GetSize(&width, &height)) || width == 0 || height == 0) {
+        return false;
+    }
+
+    const UINT stride = width * 4;
+    const UINT bufferSize = stride * height;
+    std::vector<BYTE> pixels(bufferSize);
+    WICRect fullRect = {0, 0, static_cast<INT>(width), static_cast<INT>(height)};
+    if (FAILED(source->CopyPixels(&fullRect, stride, bufferSize, pixels.data()))) {
+        return false;
+    }
+
+    UINT left = width;
+    UINT top = height;
+    UINT right = 0;
+    UINT bottom = 0;
+    bool found = false;
+
+    for (UINT y = 0; y < height; ++y) {
+        for (UINT x = 0; x < width; ++x) {
+            const BYTE alpha = pixels[y * stride + x * 4 + 3];
+            if (alpha <= 12) {
+                continue;
+            }
+
+            left = std::min(left, x);
+            top = std::min(top, y);
+            right = std::max(right, x);
+            bottom = std::max(bottom, y);
+            found = true;
+        }
+    }
+
+    if (!found) {
+        return false;
+    }
+
+    const UINT contentWidth = right - left + 1;
+    const UINT contentHeight = bottom - top + 1;
+    if (contentWidth > width * 82 / 100 && contentHeight > height * 82 / 100) {
+        return false;
+    }
+
+    const UINT contentSide = std::max(contentWidth, contentHeight);
+    const UINT padding = std::max<UINT>(2, contentSide / 12);
+    const UINT cropSide = std::min(std::max(contentSide + padding * 2, 1U), std::min(width, height));
+    const int centerX = static_cast<int>((left + right) / 2);
+    const int centerY = static_cast<int>((top + bottom) / 2);
+
+    int cropLeft = centerX - static_cast<int>(cropSide / 2);
+    int cropTop = centerY - static_cast<int>(cropSide / 2);
+    cropLeft = std::max(0, std::min(cropLeft, static_cast<int>(width - cropSide)));
+    cropTop = std::max(0, std::min(cropTop, static_cast<int>(height - cropSide)));
+
+    bounds = {cropLeft, cropTop, static_cast<INT>(cropSide), static_cast<INT>(cropSide)};
+    return true;
 }
 
 std::wstring FormatTwoDigits(int value) {
@@ -434,6 +505,11 @@ void DockWindow::DiscardDeviceResources() {
 }
 
 void DockWindow::RefreshApplications() {
+    if (pinnedApps_.Refresh()) {
+        iconCache_.Clear();
+        iconBitmaps_.clear();
+    }
+
     MergeApplications(windowTracker_.Snapshot());
 }
 
@@ -787,8 +863,19 @@ ID2D1Bitmap* DockWindow::BitmapForIcon(HICON icon) {
         return nullptr;
     }
 
+    Microsoft::WRL::ComPtr<IWICBitmapSource> bitmapSource;
+    converter.As(&bitmapSource);
+
+    WICRect cropRect = {};
+    Microsoft::WRL::ComPtr<IWICBitmapClipper> clipper;
+    if (ContentBounds(converter.Get(), cropRect) &&
+        SUCCEEDED(wicFactory_->CreateBitmapClipper(clipper.GetAddressOf())) &&
+        SUCCEEDED(clipper->Initialize(converter.Get(), &cropRect))) {
+        clipper.As(&bitmapSource);
+    }
+
     Microsoft::WRL::ComPtr<ID2D1Bitmap> d2dBitmap;
-    if (FAILED(renderTarget_->CreateBitmapFromWicBitmap(converter.Get(), nullptr, d2dBitmap.GetAddressOf()))) {
+    if (FAILED(renderTarget_->CreateBitmapFromWicBitmap(bitmapSource.Get(), nullptr, d2dBitmap.GetAddressOf()))) {
         return nullptr;
     }
 
@@ -926,15 +1013,107 @@ void DockWindow::HandleRightClick(POINT point) {
         return;
     }
 
+    ShowApplicationMenu(appIndex, point);
+}
+
+void DockWindow::ShowApplicationMenu(int appIndex, POINT point) {
     const auto& app = applications_[static_cast<size_t>(appIndex)];
-    if (app.windows.empty()) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
         return;
     }
 
-    RECT anchor = ToRect(iconLayouts_[static_cast<size_t>(appIndex)].bounds);
-    MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
-    if (previewAvailable_) {
+    const bool canLaunch = !app.launchCommand.empty();
+    const bool hasWindows = !app.windows.empty();
+
+    if (canLaunch) {
+        AppendMenuW(menu, MF_STRING, kMenuOpenOrNewWindow, hasWindows ? L"New window" : L"Open");
+    }
+
+    if (hasWindows && previewAvailable_) {
+        AppendMenuW(menu, MF_STRING, kMenuShowWindows, app.windows.size() > 1 ? L"Show windows" : L"Show window");
+    }
+
+    if (hasWindows) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kMenuCloseWindow, L"Close window");
+        if (app.windows.size() > 1) {
+            AppendMenuW(menu, MF_STRING, kMenuCloseAllWindows, L"Close all windows");
+        }
+    }
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kMenuPinToggle, app.pinned ? L"Unpin from MyDock" : L"Pin to MyDock");
+
+    POINT screenPoint = point;
+    ClientToScreen(hwnd_, &screenPoint);
+    SetForegroundWindow(hwnd_);
+
+    const UINT command = TrackPopupMenuEx(
+        menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+        screenPoint.x,
+        screenPoint.y,
+        hwnd_,
+        nullptr);
+
+    DestroyMenu(menu);
+    PostMessageW(hwnd_, WM_NULL, 0, 0);
+
+    if (command == 0) {
+        return;
+    }
+
+    auto primaryWindow = [&app]() -> HWND {
+        if (app.windows.empty()) {
+            return nullptr;
+        }
+
+        for (const auto& window : app.windows) {
+            if (ShellActions::IsWindowActive(window.hwnd)) {
+                return window.hwnd;
+            }
+        }
+
+        return app.windows.front().hwnd;
+    };
+
+    switch (command) {
+    case kMenuOpenOrNewWindow:
+        pinnedApps_.Launch(app);
+        break;
+    case kMenuShowWindows: {
+        RECT anchor = ToRect(iconLayouts_[static_cast<size_t>(appIndex)].bounds);
+        MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
         previewWindow_.ShowFor(app, anchor);
+        break;
+    }
+    case kMenuCloseWindow: {
+        if (HWND hwnd = primaryWindow()) {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+        break;
+    }
+    case kMenuCloseAllWindows:
+        for (const auto& window : app.windows) {
+            if (IsWindow(window.hwnd)) {
+                PostMessageW(window.hwnd, WM_CLOSE, 0, 0);
+            }
+        }
+        break;
+    case kMenuPinToggle:
+        if (app.pinned) {
+            pinnedApps_.Unpin(app);
+        } else {
+            pinnedApps_.Pin(app);
+        }
+        RefreshApplications();
+        iconBitmaps_.clear();
+        UpdateLayout(true);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        break;
+    default:
+        break;
     }
 }
 
