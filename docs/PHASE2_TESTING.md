@@ -25,5 +25,3 @@ Native taskbar replacement is opt-in. A fresh build starts with the Windows task
 4. Restart Windows Explorer while replacement is enabled and verify MyDock remains usable.
 5. Verify `Win`, `Win+A` and `Win+N` still open native Windows shell surfaces.
 6. Hover across the dock and verify magnification does not show a delayed redraw or flash.
-
-If the native taskbar is still visible after enabling replacement, inspect `%TEMP%\MyDock.log` and look for taskbar suppression messages.
