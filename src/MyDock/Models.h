@@ -35,6 +35,7 @@ struct ApplicationGroup {
 
 struct Settings {
     bool autoHide = false;
+    bool replaceNativeTaskbar = false;
     std::vector<PinnedAppDefinition> pinnedApps;
 };
 
@@ -44,4 +45,3 @@ std::wstring BasenameFromPath(const std::wstring& path);
 std::wstring IdentityFromExecutable(const std::wstring& executable);
 
 } // namespace MyDock
-

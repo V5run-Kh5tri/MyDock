@@ -101,6 +101,7 @@ DockWindow::DockWindow(
       iconCache_(iconCache),
       previewWindow_(instance),
       settingsWindow_(instance, settingsStore, [this]() {
+          ApplySettings();
           hidden_ = false;
           PositionWindow(false);
           if (hwnd_) {
@@ -183,6 +184,9 @@ bool DockWindow::Create() {
         LogDock(L"SettingsWindow::Create failed; continuing without settings popup");
     }
 
+    taskbarController_.Initialize(hwnd_);
+    ApplySettings();
+
     RefreshApplications();
     UpdateLayout(false);
 
@@ -221,6 +225,11 @@ LRESULT CALLBACK DockWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, 
 }
 
 LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+    if (taskbarController_.IsTaskbarCreatedMessage(message)) {
+        taskbarController_.OnTaskbarCreated();
+        return 0;
+    }
+
     switch (message) {
     case WM_SIZE:
         if (renderTarget_) {
@@ -272,6 +281,7 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (wParam == kRefreshTimer) {
             RefreshApplications();
             UpdateLayout(true);
+            taskbarController_.ReapplyIfEnabled();
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -292,6 +302,12 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         break;
+    case WM_HOTKEY:
+        if (taskbarController_.IsRestoreHotkey(wParam)) {
+            RestoreNativeTaskbarEmergency();
+            return 0;
+        }
+        break;
     case WM_ERASEBKGND:
         return 1;
     case WM_DESTROY:
@@ -300,12 +316,27 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         KillTimer(hwnd_, kAutoHideTimer);
         KillTimer(hwnd_, kTooltipTimer);
         KillTimer(hwnd_, kAnimationTimer);
+        taskbarController_.Shutdown();
         DiscardDeviceResources();
         PostQuitMessage(0);
         return 0;
     }
 
     return DefWindowProcW(hwnd_, message, wParam, lParam);
+}
+
+void DockWindow::ApplySettings() {
+    taskbarController_.ApplyEnabled(settingsStore_.Current().replaceNativeTaskbar);
+}
+
+void DockWindow::RestoreNativeTaskbarEmergency() {
+    taskbarController_.EmergencyRestore();
+    settingsStore_.Current().replaceNativeTaskbar = false;
+    settingsStore_.Save();
+
+    hidden_ = false;
+    PositionWindow(false);
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 bool DockWindow::CreateDeviceResources() {
@@ -933,6 +964,9 @@ RECT DockWindow::MonitorWorkArea() const {
     MONITORINFO info = {};
     info.cbSize = sizeof(info);
     if (monitor && GetMonitorInfoW(monitor, &info)) {
+        if (settingsStore_.Current().replaceNativeTaskbar) {
+            return info.rcMonitor;
+        }
         return info.rcWork;
     }
 

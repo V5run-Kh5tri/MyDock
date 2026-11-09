@@ -27,12 +27,12 @@ The project is split into small responsibilities:
 - `SettingsStore`: user settings in `%APPDATA%\MyDock\settings.ini`.
 - `IconCache`: native icon loading and lifetime management.
 - `PreviewWindow`: separate right-click window preview panel.
-- `SettingsWindow`: small Phase 1 settings panel for auto-hide.
+- `SettingsWindow`: compact settings panel for auto-hide and native taskbar replacement opt-in.
 - `ShellActions`: safe Phase 1 shell entry points such as Quick Settings.
+- `NativeTaskbarController`: Phase 2 taskbar discovery, opt-in suppression, restoration and recovery hotkey handling.
 
-Phase 2 taskbar suppression is intentionally absent. The native Windows taskbar remains untouched until Phase 1 is manually approved.
+Phase 2 taskbar suppression is present but remains explicitly opt-in. The native Windows taskbar is restored when MyDock exits, and `Ctrl+Alt+Shift+T` is reserved as an emergency restore path.
 
 ## Current verification limits
 
-This repository was initialized from a Linux environment without Visual Studio, MSBuild or the Windows SDK available. The project files and source are prepared for Windows, but build and runtime verification must be performed on Windows with Visual Studio 2022 or Build Tools installed.
-
+This repository was initialized from a Linux environment without Visual Studio, MSBuild or the Windows SDK available. The project files and source are prepared for Windows, but build and runtime verification must be performed on Windows with Visual Studio or Build Tools installed.

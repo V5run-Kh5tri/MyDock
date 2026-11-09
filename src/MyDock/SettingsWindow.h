@@ -20,6 +20,7 @@ private:
 
     void Paint();
     RECT AutoHideCheckRect() const;
+    RECT ReplaceTaskbarCheckRect() const;
 
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
@@ -29,4 +30,3 @@ private:
 };
 
 } // namespace MyDock
-

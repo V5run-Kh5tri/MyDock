@@ -16,6 +16,7 @@
     <ClCompile Include="IconCache.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="main.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="Models.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="NativeTaskbarController.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="PinnedApps.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="PreviewWindow.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="SettingsStore.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -28,6 +29,7 @@
     <ClInclude Include="DockWindow.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="IconCache.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="Models.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="NativeTaskbarController.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="PinnedApps.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="PreviewWindow.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="SettingsStore.h"><Filter>Header Files</Filter></ClInclude>

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IconCache.h"
+#include "NativeTaskbarController.h"
 #include "PinnedApps.h"
 #include "PreviewWindow.h"
 #include "SettingsWindow.h"
@@ -51,6 +52,8 @@ private:
     void PaintSystemSection();
     void PaintApplicationSection();
     void PaintIconsWithGdi();
+    void ApplySettings();
+    void RestoreNativeTaskbarEmergency();
 
     int HitTestSystemButton(POINT point) const;
     int HitTestApplication(POINT point) const;
@@ -74,6 +77,7 @@ private:
     IconCache& iconCache_;
     PreviewWindow previewWindow_;
     SettingsWindow settingsWindow_;
+    NativeTaskbarController taskbarController_;
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory_;

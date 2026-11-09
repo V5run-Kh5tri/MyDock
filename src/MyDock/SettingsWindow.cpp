@@ -10,7 +10,7 @@ namespace {
 
 constexpr wchar_t kSettingsClassName[] = L"MyDockSettingsWindow";
 constexpr int kWidth = 280;
-constexpr int kHeight = 124;
+constexpr int kHeight = 166;
 
 HFONT CreateSettingsFont(int weight = FW_NORMAL) {
     return CreateFontW(
@@ -101,8 +101,16 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
     case WM_LBUTTONUP: {
         POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         const RECT autoHide = AutoHideCheckRect();
+        const RECT replaceTaskbar = ReplaceTaskbarCheckRect();
         if (PtInRect(&autoHide, point)) {
             settingsStore_.Current().autoHide = !settingsStore_.Current().autoHide;
+            settingsStore_.Save();
+            if (onSettingsChanged_) {
+                onSettingsChanged_();
+            }
+            InvalidateRect(hwnd_, nullptr, TRUE);
+        } else if (PtInRect(&replaceTaskbar, point)) {
+            settingsStore_.Current().replaceNativeTaskbar = !settingsStore_.Current().replaceNativeTaskbar;
             settingsStore_.Save();
             if (onSettingsChanged_) {
                 onSettingsChanged_();
@@ -133,7 +141,6 @@ void SettingsWindow::Paint() {
     GetClientRect(hwnd_, &client);
 
     HBRUSH background = CreateSolidBrush(RGB(32, 34, 38));
-    HBRUSH checkBrush = CreateSolidBrush(settingsStore_.Current().autoHide ? RGB(65, 156, 255) : RGB(72, 76, 84));
     HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(105, 108, 118));
     HFONT titleFont = CreateSettingsFont(FW_SEMIBOLD);
     HFONT bodyFont = CreateSettingsFont();
@@ -146,29 +153,34 @@ void SettingsWindow::Paint() {
     RECT title = {18, 14, client.right - 18, 42};
     DrawTextW(dc, L"MyDock settings", -1, &title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT check = AutoHideCheckRect();
-    SelectObject(dc, checkBrush);
-    SelectObject(dc, borderPen);
-    RoundRect(dc, check.left, check.top, check.right, check.bottom, 8, 8);
-
-    if (settingsStore_.Current().autoHide) {
-        HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-        SelectObject(dc, tickPen);
-        MoveToEx(dc, check.left + 6, check.top + 12, nullptr);
-        LineTo(dc, check.left + 12, check.top + 18);
-        LineTo(dc, check.right - 6, check.top + 6);
-        DeleteObject(tickPen);
-    }
-
     SelectObject(dc, bodyFont);
     SetTextColor(dc, RGB(230, 232, 236));
-    RECT label = {check.right + 10, check.top - 2, client.right - 18, check.bottom + 4};
-    DrawTextW(dc, L"Auto-hide dock", -1, &label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    const auto drawCheckRow = [&](RECT check, const wchar_t* labelText, bool checked) {
+        HBRUSH checkBrush = CreateSolidBrush(checked ? RGB(65, 156, 255) : RGB(72, 76, 84));
+        SelectObject(dc, checkBrush);
+        SelectObject(dc, borderPen);
+        RoundRect(dc, check.left, check.top, check.right, check.bottom, 8, 8);
+
+        if (checked) {
+            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+            SelectObject(dc, tickPen);
+            MoveToEx(dc, check.left + 6, check.top + 12, nullptr);
+            LineTo(dc, check.left + 12, check.top + 18);
+            LineTo(dc, check.right - 6, check.top + 6);
+            DeleteObject(tickPen);
+        }
+
+        RECT label = {check.right + 10, check.top - 2, client.right - 18, check.bottom + 4};
+        DrawTextW(dc, labelText, -1, &label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DeleteObject(checkBrush);
+    };
+
+    drawCheckRow(AutoHideCheckRect(), L"Auto-hide dock", settingsStore_.Current().autoHide);
+    drawCheckRow(ReplaceTaskbarCheckRect(), L"Replace native taskbar", settingsStore_.Current().replaceNativeTaskbar);
 
     DeleteObject(bodyFont);
     DeleteObject(titleFont);
     DeleteObject(borderPen);
-    DeleteObject(checkBrush);
     DeleteObject(background);
 
     EndPaint(hwnd_, &paint);
@@ -176,6 +188,10 @@ void SettingsWindow::Paint() {
 
 RECT SettingsWindow::AutoHideCheckRect() const {
     return {20, 64, 44, 88};
+}
+
+RECT SettingsWindow::ReplaceTaskbarCheckRect() const {
+    return {20, 104, 44, 128};
 }
 
 } // namespace MyDock

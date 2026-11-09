@@ -204,6 +204,8 @@ bool SettingsStore::Load() {
 
         if (key == L"autohide") {
             settings_.autoHide = value == L"1" || ToLower(value) == L"true";
+        } else if (key == L"replacenativetaskbar") {
+            settings_.replaceNativeTaskbar = value == L"1" || ToLower(value) == L"true";
         } else if (key == L"pin") {
             auto fields = Split(value, L'|');
             if (fields.size() >= 3) {
@@ -239,8 +241,9 @@ bool SettingsStore::Save() const {
         return false;
     }
 
-    file << L"# MyDock Phase 1 settings\n";
+    file << L"# MyDock settings\n";
     file << L"autoHide=" << (settings_.autoHide ? L"1" : L"0") << L"\n";
+    file << L"replaceNativeTaskbar=" << (settings_.replaceNativeTaskbar ? L"1" : L"0") << L"\n";
 
     for (const auto& app : settings_.pinnedApps) {
         file << L"pin=" << app.displayName << L"|"

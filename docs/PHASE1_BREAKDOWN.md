@@ -17,7 +17,7 @@ Phase 1 stays focused on a working dock UI/UX while leaving the native Windows t
 
 ## Next verification steps on Windows
 
-1. Build `MyDock.sln` with Visual Studio 2022 or MSBuild.
+1. Build `MyDock.sln` with Visual Studio or MSBuild.
 2. Run the app on Windows 11 and verify the dock remains above the existing taskbar work area.
 3. Verify pinned app launching for File Explorer, Edge and Notepad.
 4. Open multiple windows per application and verify grouping plus one/two/three indicators.
@@ -26,11 +26,6 @@ Phase 1 stays focused on a working dock UI/UX while leaving the native Windows t
 7. Toggle auto-hide in MyDock settings and verify reveal/retract timing.
 8. Tune visual details after runtime inspection before requesting Phase 1 UI/UX approval.
 
-## Deferred until after explicit Phase 1 approval
+## Phase 2 status
 
-- Native taskbar suppression.
-- Explorer/taskbar lifecycle handling.
-- Recovery mechanisms for replacing the taskbar.
-- System tray replacement work.
-- Any live modification of the user's Windows taskbar state.
-
+Phase 1 UI/UX has been approved. Phase 2 has started with opt-in native taskbar suppression, Explorer taskbar recreation handling and recovery mechanisms. System tray replacement work remains future Phase 2 scope.
