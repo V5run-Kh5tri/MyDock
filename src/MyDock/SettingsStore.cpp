@@ -132,6 +132,18 @@ std::wstring ShortcutTarget(const std::filesystem::path& shortcutPath, std::wstr
     wchar_t target[MAX_PATH] = {};
     shellLink->GetPath(target, _countof(target), nullptr, SLGP_RAWPATH);
 
+    Microsoft::WRL::ComPtr<IPropertyStore> properties;
+    if (SUCCEEDED(shellLink.As(&properties))) {
+        PROPVARIANT value = {};
+        PropVariantInit(&value);
+        if (SUCCEEDED(properties->GetValue(PKEY_AppUserModel_ID, &value)) && value.vt == VT_LPWSTR && value.pwszVal) {
+            if (appUserModelId) {
+                *appUserModelId = value.pwszVal;
+            }
+        }
+        PropVariantClear(&value);
+    }
+
     if (iconPath) {
         wchar_t iconLocation[MAX_PATH] = {};
         int iconIndex = 0;
@@ -142,20 +154,6 @@ std::wstring ShortcutTarget(const std::filesystem::path& shortcutPath, std::wstr
 
     if (target[0] != L'\0') {
         return target;
-    }
-
-    Microsoft::WRL::ComPtr<IPropertyStore> properties;
-    if (SUCCEEDED(shellLink.As(&properties))) {
-        PROPVARIANT value = {};
-        PropVariantInit(&value);
-        if (SUCCEEDED(properties->GetValue(PKEY_AppUserModel_ID, &value)) && value.vt == VT_LPWSTR && value.pwszVal) {
-            if (appUserModelId) {
-                *appUserModelId = value.pwszVal;
-            }
-            PropVariantClear(&value);
-            return {};
-        }
-        PropVariantClear(&value);
     }
 
     return {};
@@ -197,6 +195,9 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
         std::wstring launchCommand = ShortcutTarget(shortcut, &iconPath, &appUserModelId);
         if (launchCommand.empty()) {
             launchCommand = shortcut.wstring();
+        }
+        if (!appUserModelId.empty()) {
+            iconPath = L"shell:AppsFolder\\" + appUserModelId;
         }
         if (iconPath.empty()) {
             iconPath = shortcut.wstring();
