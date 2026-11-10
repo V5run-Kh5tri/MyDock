@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DockMenuWindow.h"
 #include "IconCache.h"
 #include "NativeTaskbarController.h"
 #include "PinnedApps.h"
@@ -63,7 +64,8 @@ private:
     void StepAnimation();
     void HandleLeftClick(POINT point);
     void HandleRightClick(POINT point);
-    void ShowApplicationMenu(int appIndex, POINT point);
+    void ShowApplicationMenu(int appIndex);
+    void ExecuteMenuCommand(UINT command);
     void UpdateHover(POINT point);
     void HideTooltip();
     void MaybeShowTooltip();
@@ -80,6 +82,7 @@ private:
     WindowTracker& windowTracker_;
     IconCache& iconCache_;
     PreviewWindow previewWindow_;
+    DockMenuWindow contextMenu_;
     SettingsWindow settingsWindow_;
     NativeTaskbarController taskbarController_;
 
@@ -114,7 +117,9 @@ private:
     std::wstring tooltipText_;
     bool mouseInside_ = false;
     bool hidden_ = false;
-    bool menuActive_ = false;
+    ApplicationGroup menuApp_;
+    bool contextMenuAvailable_ = false;
+    bool swallowLeftClick_ = false;
     bool previewAvailable_ = false;
     bool settingsAvailable_ = false;
     int currentY_ = 0;

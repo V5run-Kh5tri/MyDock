@@ -28,6 +28,7 @@ constexpr UINT kMenuShowWindows = 1002;
 constexpr UINT kMenuCloseWindow = 1003;
 constexpr UINT kMenuCloseAllWindows = 1004;
 constexpr UINT kMenuPinToggle = 1005;
+constexpr UINT kMenuCommandMessage = WM_APP + 1;
 
 constexpr int kWindowHeight = 106;
 constexpr int kSurfaceTop = 28;
@@ -165,6 +166,7 @@ DockWindow::DockWindow(
       windowTracker_(windowTracker),
       iconCache_(iconCache),
       previewWindow_(instance),
+      contextMenu_(instance),
       settingsWindow_(instance, settingsStore, [this]() {
           ApplySettings();
           hidden_ = false;
@@ -237,6 +239,11 @@ bool DockWindow::Create() {
         LogDock(L"PreviewWindow::Create failed; continuing without previews");
     }
 
+    contextMenuAvailable_ = contextMenu_.Create(hwnd_, kMenuCommandMessage);
+    if (!contextMenuAvailable_) {
+        LogDock(L"DockMenuWindow::Create failed; continuing without app context menu");
+    }
+
     settingsAvailable_ = settingsWindow_.Create(hwnd_);
     if (!settingsAvailable_) {
         LogDock(L"SettingsWindow::Create failed; continuing without settings popup");
@@ -289,6 +296,9 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
 
     switch (message) {
+    case kMenuCommandMessage:
+        ExecuteMenuCommand(static_cast<UINT>(wParam));
+        return 0;
     case WM_SIZE:
         if (renderTarget_) {
             renderTarget_->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam)));
@@ -324,8 +334,14 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         return 0;
     case WM_LBUTTONDOWN:
         foregroundBeforeClick_ = GetAncestor(GetForegroundWindow(), GA_ROOT);
+        // A click that only dismissed the context menu should not also activate an app.
+        swallowLeftClick_ = contextMenu_.WasJustDismissed();
         return 0;
     case WM_LBUTTONUP: {
+        if (swallowLeftClick_) {
+            swallowLeftClick_ = false;
+            return 0;
+        }
         POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         HandleLeftClick(point);
         return 0;
@@ -662,15 +678,16 @@ void DockWindow::PositionWindow(bool animate) {
 
     if (!settingsStore_.Current().autoHide) {
         hidden_ = false;
-    } else if (cursorInDock || mouseInside_) {
+    } else if (cursorInDock || mouseInside_ || contextMenu_.IsVisible()) {
+        // Keep the dock up while its context menu is open, even though the cursor is over the menu.
         hidden_ = false;
         lastInsideTime_ = now;
     } else if (now - lastInsideTime_ > std::chrono::milliseconds(850)) {
         hidden_ = true;
     }
 
-    if (!wasHidden && hidden_ && menuActive_) {
-        EndMenu();
+    if (!wasHidden && hidden_) {
+        contextMenu_.Hide();
     }
 
     const int targetX = work.left + ((work.right - work.left) - dockSize_.cx) / 2;
@@ -1041,56 +1058,72 @@ void DockWindow::HandleRightClick(POINT point) {
         return;
     }
 
-    ShowApplicationMenu(appIndex, point);
+    ShowApplicationMenu(appIndex);
 }
 
-void DockWindow::ShowApplicationMenu(int appIndex, POINT point) {
-    const ApplicationGroup app = applications_[static_cast<size_t>(appIndex)];
-    HMENU menu = CreatePopupMenu();
-    if (!menu) {
+void DockWindow::ShowApplicationMenu(int appIndex) {
+    if (!contextMenuAvailable_ ||
+        appIndex < 0 ||
+        appIndex >= static_cast<int>(applications_.size()) ||
+        appIndex >= static_cast<int>(iconLayouts_.size())) {
         return;
     }
 
-    const bool canLaunch = !app.launchCommand.empty();
-    const bool hasWindows = !app.windows.empty();
+    // Snapshot the app: applications_ is rebuilt every second, so neither an index nor a
+    // reference would still be valid when the command message arrives.
+    menuApp_ = applications_[static_cast<size_t>(appIndex)];
+
+    const bool canLaunch = !menuApp_.launchCommand.empty();
+    const bool hasWindows = !menuApp_.windows.empty();
+
+    std::vector<DockMenuItem> items;
+    auto addItem = [&items](UINT command, const wchar_t* label, wchar_t glyph) {
+        DockMenuItem item;
+        item.command = command;
+        item.label = label;
+        item.glyph = glyph;
+        items.push_back(std::move(item));
+    };
+    auto addSeparator = [&items]() {
+        if (!items.empty() && !items.back().separator) {
+            DockMenuItem separator;
+            separator.separator = true;
+            items.push_back(std::move(separator));
+        }
+    };
 
     if (canLaunch) {
-        AppendMenuW(menu, MF_STRING, kMenuOpenOrNewWindow, hasWindows ? L"New window" : L"Open");
+        addItem(kMenuOpenOrNewWindow, hasWindows ? L"New window" : L"Open", hasWindows ? L'\xE710' : L'\xE8A7');
     }
-
     if (hasWindows && previewAvailable_) {
-        AppendMenuW(menu, MF_STRING, kMenuShowWindows, app.windows.size() > 1 ? L"Show windows" : L"Show window");
+        addItem(kMenuShowWindows, menuApp_.windows.size() > 1 ? L"Show windows" : L"Show window", L'\xE7C4');
     }
-
     if (hasWindows) {
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kMenuCloseWindow, L"Close window");
-        if (app.windows.size() > 1) {
-            AppendMenuW(menu, MF_STRING, kMenuCloseAllWindows, L"Close all windows");
+        addSeparator();
+        addItem(kMenuCloseWindow, L"Close window", L'\xE711');
+        if (menuApp_.windows.size() > 1) {
+            addItem(kMenuCloseAllWindows, L"Close all windows", L'\xE711');
         }
     }
+    addSeparator();
+    addItem(kMenuPinToggle, menuApp_.pinned ? L"Unpin from MyDock" : L"Pin to MyDock", menuApp_.pinned ? L'\xE77A' : L'\xE718');
 
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kMenuPinToggle, app.pinned ? L"Unpin from MyDock" : L"Pin to MyDock");
+    HideTooltip();
+    KillTimer(hwnd_, kTooltipTimer);
 
-    POINT screenPoint = point;
-    ClientToScreen(hwnd_, &screenPoint);
-    SetForegroundWindow(hwnd_);
+    RECT anchor = ToRect(iconLayouts_[static_cast<size_t>(appIndex)].bounds);
+    MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
 
-    menuActive_ = true;
-    const UINT command = TrackPopupMenuEx(
-        menu,
-        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-        screenPoint.x,
-        screenPoint.y,
-        hwnd_,
-        nullptr);
-    menuActive_ = false;
+    // Open above the whole dock window (which already includes headroom for magnified icons),
+    // never over it.
+    constexpr LONG kMenuGap = 6;
+    const RECT dock = WindowRect();
+    contextMenu_.Show(menuApp_.displayName, std::move(items), anchor.left, anchor.right, dock.top - kMenuGap);
+}
 
-    DestroyMenu(menu);
-    PostMessageW(hwnd_, WM_NULL, 0, 0);
-
-    if (command == 0) {
+void DockWindow::ExecuteMenuCommand(UINT command) {
+    const ApplicationGroup app = menuApp_;
+    if (app.id.empty()) {
         return;
     }
 
@@ -1113,20 +1146,23 @@ void DockWindow::ShowApplicationMenu(int appIndex, POINT point) {
         pinnedApps_.Launch(app);
         break;
     case kMenuShowWindows: {
-        RECT anchor = {point.x - 1, point.y - 1, point.x + 1, point.y + 1};
-        if (appIndex >= 0 && appIndex < static_cast<int>(iconLayouts_.size())) {
-            anchor = ToRect(iconLayouts_[static_cast<size_t>(appIndex)].bounds);
+        // Re-locate the app: the dock may have changed since the menu opened.
+        RECT anchor = WindowRect();
+        for (size_t index = 0; index < applications_.size() && index < iconLayouts_.size(); ++index) {
+            if (ToLower(applications_[index].id) == ToLower(app.id)) {
+                anchor = ToRect(iconLayouts_[index].bounds);
+                MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
+                break;
+            }
         }
-        MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
         previewWindow_.ShowFor(app, anchor);
         break;
     }
-    case kMenuCloseWindow: {
-        if (HWND hwnd = primaryWindow()) {
+    case kMenuCloseWindow:
+        if (HWND hwnd = primaryWindow(); hwnd && IsWindow(hwnd)) {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
         break;
-    }
     case kMenuCloseAllWindows:
         for (const auto& window : app.windows) {
             if (IsWindow(window.hwnd)) {
