@@ -139,14 +139,65 @@ std::wstring ShortcutDisplayName(const std::filesystem::path& shortcutPath) {
     return displayName.empty() ? shortcutPath.filename().wstring() : displayName;
 }
 
+std::wstring ReadStringProperty(IPropertyStore* properties, REFPROPERTYKEY key) {
+    if (!properties) {
+        return {};
+    }
+
+    PROPVARIANT value = {};
+    PropVariantInit(&value);
+    std::wstring result;
+    if (SUCCEEDED(properties->GetValue(key, &value)) && value.vt == VT_LPWSTR && value.pwszVal) {
+        result = value.pwszVal;
+    }
+    PropVariantClear(&value);
+    return result;
+}
+
+bool ParseIconResourceString(const std::wstring& resource, std::wstring* iconPath, int* iconIndex) {
+    std::wstring value = Trim(resource);
+    if (!value.empty() && value.front() == L'@') {
+        value.erase(value.begin());
+    }
+
+    if (value.empty()) {
+        return false;
+    }
+
+    int parsedIndex = 0;
+    const auto comma = value.rfind(L',');
+    if (comma != std::wstring::npos) {
+        const auto indexText = Trim(value.substr(comma + 1));
+        wchar_t* end = nullptr;
+        const long parsed = std::wcstol(indexText.c_str(), &end, 10);
+        if (end && *end == L'\0') {
+            parsedIndex = static_cast<int>(parsed);
+            value = Trim(value.substr(0, comma));
+        }
+    }
+
+    if (value.empty()) {
+        return false;
+    }
+
+    if (iconPath) {
+        *iconPath = std::move(value);
+    }
+    if (iconIndex) {
+        *iconIndex = parsedIndex;
+    }
+    return true;
+}
+
 bool ShouldLogShortcutDetails(
     const std::filesystem::path& shortcut,
     const std::wstring& target,
     const std::wstring& iconPath,
     int iconIndex,
-    const std::wstring& appUserModelId) {
+    const std::wstring& appUserModelId,
+    const std::wstring& relaunchIconResource) {
     (void)iconIndex;
-    const auto combined = ToLower(shortcut.wstring() + L" " + target + L" " + iconPath + L" " + appUserModelId);
+    const auto combined = ToLower(shortcut.wstring() + L" " + target + L" " + iconPath + L" " + appUserModelId + L" " + relaunchIconResource);
     return combined.find(L"whatsapp") != std::wstring::npos ||
            combined.find(L"settings") != std::wstring::npos ||
            combined.find(L"systemsettings") != std::wstring::npos ||
@@ -160,8 +211,9 @@ void LogShortcutDetails(
     const std::wstring& target,
     const std::wstring& iconPath,
     int iconIndex,
-    const std::wstring& appUserModelId) {
-    if (!ShouldLogShortcutDetails(shortcut, target, iconPath, iconIndex, appUserModelId)) {
+    const std::wstring& appUserModelId,
+    const std::wstring& relaunchIconResource) {
+    if (!ShouldLogShortcutDetails(shortcut, target, iconPath, iconIndex, appUserModelId, relaunchIconResource)) {
         return;
     }
 
@@ -181,13 +233,16 @@ void LogShortcutDetails(
     log << L"  iconPath: " << iconPath << L"\n";
     log << L"  iconIndex: " << iconIndex << L"\n";
     log << L"  appUserModelId: " << appUserModelId << L"\n";
+    log << L"  relaunchIconResource: " << relaunchIconResource << L"\n";
 }
 
 std::wstring ShortcutTarget(
     const std::filesystem::path& shortcutPath,
     std::wstring* iconPath,
     int* iconIndex,
-    std::wstring* appUserModelId) {
+    std::wstring* appUserModelId,
+    std::wstring* relaunchCommand,
+    std::wstring* relaunchIconResource) {
     Microsoft::WRL::ComPtr<IShellLinkW> shellLink;
     if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(shellLink.GetAddressOf())))) {
         return {};
@@ -203,14 +258,15 @@ std::wstring ShortcutTarget(
 
     Microsoft::WRL::ComPtr<IPropertyStore> properties;
     if (SUCCEEDED(shellLink.As(&properties))) {
-        PROPVARIANT value = {};
-        PropVariantInit(&value);
-        if (SUCCEEDED(properties->GetValue(PKEY_AppUserModel_ID, &value)) && value.vt == VT_LPWSTR && value.pwszVal) {
-            if (appUserModelId) {
-                *appUserModelId = value.pwszVal;
-            }
+        if (appUserModelId) {
+            *appUserModelId = ReadStringProperty(properties.Get(), PKEY_AppUserModel_ID);
         }
-        PropVariantClear(&value);
+        if (relaunchCommand) {
+            *relaunchCommand = ReadStringProperty(properties.Get(), PKEY_AppUserModel_RelaunchCommand);
+        }
+        if (relaunchIconResource) {
+            *relaunchIconResource = ReadStringProperty(properties.Get(), PKEY_AppUserModel_RelaunchIconResource);
+        }
     }
 
     if (iconPath) {
@@ -265,14 +321,23 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
         std::wstring iconPath;
         int iconIndex = 0;
         std::wstring appUserModelId;
-        std::wstring launchCommand = ShortcutTarget(shortcut, &iconPath, &iconIndex, &appUserModelId);
+        std::wstring relaunchCommand;
+        std::wstring relaunchIconResource;
+        std::wstring launchCommand =
+            ShortcutTarget(shortcut, &iconPath, &iconIndex, &appUserModelId, &relaunchCommand, &relaunchIconResource);
+        std::wstring relaunchIconPath;
+        int relaunchIconIndex = 0;
+        const bool hasRelaunchIcon = ParseIconResourceString(relaunchIconResource, &relaunchIconPath, &relaunchIconIndex);
+        if (launchCommand.empty() && !relaunchCommand.empty()) {
+            launchCommand = relaunchCommand;
+        }
         if (launchCommand.empty()) {
             launchCommand = shortcut.wstring();
         }
         if (iconPath.empty()) {
             iconPath = shortcut.wstring();
         }
-        LogShortcutDetails(shortcut, launchCommand, iconPath, iconIndex, appUserModelId);
+        LogShortcutDetails(shortcut, launchCommand, iconPath, iconIndex, appUserModelId, relaunchIconResource);
 
         PinnedAppDefinition app;
         app.displayName = ShortcutDisplayName(shortcut);
@@ -280,8 +345,8 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
         app.iconPath = iconPath;
         app.iconIdentity.shortcutPath = shortcut.wstring();
         app.iconIdentity.appUserModelId = appUserModelId;
-        app.iconIdentity.iconResourcePath = iconPath;
-        app.iconIdentity.iconResourceIndex = iconIndex;
+        app.iconIdentity.iconResourcePath = hasRelaunchIcon ? relaunchIconPath : iconPath;
+        app.iconIdentity.iconResourceIndex = hasRelaunchIcon ? relaunchIconIndex : iconIndex;
         app.iconIdentity.executablePath = launchCommand == shortcut.wstring() ? std::wstring{} : launchCommand;
         app.id = (!appUserModelId.empty() && launchCommand == shortcut.wstring())
                      ? appUserModelId

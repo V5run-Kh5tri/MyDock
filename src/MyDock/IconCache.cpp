@@ -146,6 +146,16 @@ std::wstring ExpandEnvironment(std::wstring value) {
         return {};
     }
 
+    const auto lower = ToLower(value);
+    constexpr wchar_t kSystemDirToken[] = L"%systemdir%";
+    const auto systemDir = lower.find(kSystemDirToken);
+    if (systemDir != std::wstring::npos) {
+        wchar_t systemDirectory[MAX_PATH] = {};
+        if (GetSystemDirectoryW(systemDirectory, _countof(systemDirectory)) > 0) {
+            value.replace(systemDir, std::wstring(kSystemDirToken).size(), systemDirectory);
+        }
+    }
+
     DWORD required = ExpandEnvironmentStringsW(value.c_str(), nullptr, 0);
     if (required == 0) {
         return value;
