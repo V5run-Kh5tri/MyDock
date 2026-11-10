@@ -6,9 +6,12 @@
 #include <Shlwapi.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <set>
+#include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -35,7 +38,8 @@ void LogIconFallback(const ApplicationGroup& app, const std::vector<std::wstring
 
 bool ShouldLogIconDetails(const ApplicationGroup& app) {
     const auto combined = ToLower(app.displayName + L" " + app.id + L" " + app.launchCommand + L" " + app.iconPath);
-    return combined.find(L"whatsapp") != std::wstring::npos;
+    return combined.find(L"whatsapp") != std::wstring::npos ||
+           combined.find(L"settings") != std::wstring::npos;
 }
 
 void LogIconResolution(
@@ -148,6 +152,300 @@ std::wstring AppsFolderPathFromAumid(const std::wstring& appUserModelId) {
     return L"shell:AppsFolder\\" + appUserModelId;
 }
 
+std::wstring WideFromUtf8(const std::string& value) {
+    if (value.empty()) {
+        return {};
+    }
+
+    const int required = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
+    if (required <= 0) {
+        return std::wstring(value.begin(), value.end());
+    }
+
+    std::wstring result(static_cast<size_t>(required), L'\0');
+    const int written = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, result.data(), required);
+    if (written <= 0) {
+        return std::wstring(value.begin(), value.end());
+    }
+
+    result.resize(static_cast<size_t>(written - 1));
+    return result;
+}
+
+std::string ReadTextFile(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        return {};
+    }
+
+    std::ostringstream contents;
+    contents << file.rdbuf();
+    return contents.str();
+}
+
+std::wstring WindowsAppsPackageRootFromPath(const std::wstring& source) {
+    const auto lower = ToLower(source);
+    constexpr wchar_t kWindowsAppsSegment[] = L"\\windowsapps\\";
+    const auto segment = lower.find(kWindowsAppsSegment);
+    if (segment == std::wstring::npos) {
+        return {};
+    }
+
+    const size_t packageStart = segment + std::wstring(kWindowsAppsSegment).size();
+    const auto packageEnd = source.find_first_of(L"\\/", packageStart);
+    if (packageEnd == std::wstring::npos) {
+        return {};
+    }
+
+    return source.substr(0, packageEnd);
+}
+
+std::wstring PackageFamilyNameFromRoot(const std::wstring& packageRoot) {
+    const auto fullName = std::filesystem::path(packageRoot).filename().wstring();
+    const auto publisherSeparator = fullName.find(L"__");
+    const auto firstSeparator = fullName.find(L'_');
+    if (publisherSeparator == std::wstring::npos || firstSeparator == std::wstring::npos) {
+        return {};
+    }
+
+    const auto packageName = fullName.substr(0, firstSeparator);
+    const auto publisherId = fullName.substr(publisherSeparator + 2);
+    if (packageName.empty() || publisherId.empty()) {
+        return {};
+    }
+
+    return packageName + L"_" + publisherId;
+}
+
+std::vector<std::wstring> ExtractAttributeValues(const std::string& xml, const std::string& attribute) {
+    std::vector<std::wstring> values;
+    size_t position = 0;
+
+    while (position < xml.size()) {
+        const size_t attributePosition = xml.find(attribute, position);
+        if (attributePosition == std::string::npos) {
+            break;
+        }
+
+        size_t valueStart = xml.find_first_of("\"'", attributePosition + attribute.size());
+        if (valueStart == std::string::npos) {
+            break;
+        }
+
+        const char quote = xml[valueStart];
+        ++valueStart;
+        const size_t valueEnd = xml.find(quote, valueStart);
+        if (valueEnd == std::string::npos) {
+            break;
+        }
+
+        const auto value = WideFromUtf8(xml.substr(valueStart, valueEnd - valueStart));
+        if (!value.empty()) {
+            values.push_back(value);
+        }
+
+        position = valueEnd + 1;
+    }
+
+    return values;
+}
+
+std::vector<std::wstring> ExtractApplicationIds(const std::string& xml) {
+    std::vector<std::wstring> ids;
+    size_t position = 0;
+
+    while (position < xml.size()) {
+        const size_t appPosition = xml.find("<Application", position);
+        if (appPosition == std::string::npos) {
+            break;
+        }
+
+        const size_t tagEnd = xml.find('>', appPosition);
+        if (tagEnd == std::string::npos) {
+            break;
+        }
+
+        const auto tag = xml.substr(appPosition, tagEnd - appPosition);
+        auto tagIds = ExtractAttributeValues(tag, "Id=");
+        ids.insert(ids.end(), tagIds.begin(), tagIds.end());
+        position = tagEnd + 1;
+    }
+
+    if (ids.empty()) {
+        ids.push_back(L"App");
+    }
+
+    return ids;
+}
+
+bool IsImageAssetFile(const std::wstring& value) {
+    const auto extension = ToLower(std::filesystem::path(value).extension().wstring());
+    return extension == L".png" ||
+           extension == L".jpg" ||
+           extension == L".jpeg" ||
+           extension == L".bmp" ||
+           extension == L".ico";
+}
+
+int AssetScore(const std::wstring& filename) {
+    const auto lower = ToLower(filename);
+    int score = 0;
+
+    if (lower.find(L"targetsize-256") != std::wstring::npos) {
+        score += 400;
+    } else if (lower.find(L"targetsize-192") != std::wstring::npos) {
+        score += 350;
+    } else if (lower.find(L"targetsize-128") != std::wstring::npos) {
+        score += 300;
+    } else if (lower.find(L"targetsize-96") != std::wstring::npos) {
+        score += 250;
+    } else if (lower.find(L"scale-400") != std::wstring::npos) {
+        score += 220;
+    } else if (lower.find(L"scale-200") != std::wstring::npos) {
+        score += 180;
+    } else if (lower.find(L"scale-100") != std::wstring::npos) {
+        score += 100;
+    }
+
+    if (lower.find(L"unplated") != std::wstring::npos) {
+        score += 20;
+    }
+
+    if (lower.find(L"logo") != std::wstring::npos) {
+        score += 10;
+    }
+
+    return score;
+}
+
+void AddPackageAssetCandidates(
+    std::vector<std::wstring>& candidates,
+    std::set<std::wstring>& seen,
+    const std::filesystem::path& packageRoot,
+    const std::wstring& relativeAsset) {
+    if (relativeAsset.empty()) {
+        return;
+    }
+
+    const auto assetPath = packageRoot / std::filesystem::path(relativeAsset);
+    const auto directory = assetPath.parent_path();
+    const auto stem = ToLower(assetPath.stem().wstring());
+    const auto extension = ToLower(assetPath.extension().wstring());
+
+    std::vector<std::pair<int, std::wstring>> variants;
+    std::error_code ec;
+    if (!directory.empty() && std::filesystem::exists(directory, ec)) {
+        for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
+            if (ec) {
+                break;
+            }
+
+            if (!entry.is_regular_file(ec)) {
+                continue;
+            }
+
+            const auto path = entry.path();
+            if (ToLower(path.extension().wstring()) != extension) {
+                continue;
+            }
+
+            const auto candidateStem = ToLower(path.stem().wstring());
+            if (candidateStem.rfind(stem, 0) == 0 && IsImageAssetFile(path.wstring())) {
+                variants.emplace_back(AssetScore(path.filename().wstring()), path.wstring());
+            }
+        }
+    }
+
+    std::sort(variants.begin(), variants.end(), [](const auto& left, const auto& right) {
+        if (left.first != right.first) {
+            return left.first > right.first;
+        }
+
+        return ToLower(left.second) < ToLower(right.second);
+    });
+
+    for (const auto& [_, path] : variants) {
+        AddCandidate(candidates, seen, path);
+    }
+
+    AddCandidate(candidates, seen, assetPath.wstring());
+}
+
+void AddGenericPackageLogoCandidates(
+    std::vector<std::wstring>& candidates,
+    std::set<std::wstring>& seen,
+    const std::filesystem::path& packageRoot) {
+    const auto assetsFolder = packageRoot / L"Assets";
+    std::error_code ec;
+    if (!std::filesystem::exists(assetsFolder, ec)) {
+        return;
+    }
+
+    std::vector<std::pair<int, std::wstring>> assets;
+    for (const auto& entry : std::filesystem::directory_iterator(assetsFolder, ec)) {
+        if (ec) {
+            break;
+        }
+
+        if (!entry.is_regular_file(ec) || !IsImageAssetFile(entry.path().wstring())) {
+            continue;
+        }
+
+        const auto filename = ToLower(entry.path().filename().wstring());
+        if (filename.find(L"logo") == std::wstring::npos) {
+            continue;
+        }
+
+        assets.emplace_back(AssetScore(filename), entry.path().wstring());
+    }
+
+    std::sort(assets.begin(), assets.end(), [](const auto& left, const auto& right) {
+        if (left.first != right.first) {
+            return left.first > right.first;
+        }
+
+        return ToLower(left.second) < ToLower(right.second);
+    });
+
+    size_t added = 0;
+    for (const auto& [_, path] : assets) {
+        AddCandidate(candidates, seen, path);
+        if (++added >= 12) {
+            break;
+        }
+    }
+}
+
+void AddWindowsAppsPackageCandidates(
+    std::vector<std::wstring>& candidates,
+    std::set<std::wstring>& seen,
+    const std::wstring& source) {
+    const auto packageRootText = WindowsAppsPackageRootFromPath(source);
+    if (packageRootText.empty()) {
+        return;
+    }
+
+    const auto packageRoot = std::filesystem::path(packageRootText);
+    const auto packageFamilyName = PackageFamilyNameFromRoot(packageRootText);
+    const auto manifest = ReadTextFile(packageRoot / L"AppxManifest.xml");
+
+    if (!packageFamilyName.empty()) {
+        for (const auto& appId : ExtractApplicationIds(manifest)) {
+            AddCandidate(candidates, seen, L"shell:AppsFolder\\" + packageFamilyName + L"!" + appId);
+        }
+    }
+
+    if (!manifest.empty()) {
+        for (const auto& attribute : {"Square44x44Logo=", "Square150x150Logo=", "Logo=", "SmallLogo="}) {
+            for (const auto& logo : ExtractAttributeValues(manifest, attribute)) {
+                AddPackageAssetCandidates(candidates, seen, packageRoot, logo);
+            }
+        }
+    }
+
+    AddGenericPackageLogoCandidates(candidates, seen, packageRoot);
+}
+
 bool IsShellNamespacePath(const std::wstring& value) {
     const auto lower = ToLower(value);
     return lower.rfind(L"shell:", 0) == 0 || lower.rfind(L"::{", 0) == 0;
@@ -228,6 +526,8 @@ std::vector<std::wstring> ResolveIconSources(const ApplicationGroup& app) {
     std::vector<std::wstring> candidates;
     std::set<std::wstring> seen;
     AddCandidate(candidates, seen, AppsFolderPathFromAumid(app.id));
+    AddWindowsAppsPackageCandidates(candidates, seen, app.iconPath);
+    AddWindowsAppsPackageCandidates(candidates, seen, app.launchCommand);
     AddCandidate(candidates, seen, app.iconPath);
     AddCandidate(candidates, seen, app.launchCommand);
 
@@ -292,7 +592,10 @@ HICON IconFromShellItemImageFactory(const std::wstring& iconSource, int size) {
     HBITMAP bitmap = nullptr;
     SIZE requestedSize = {size, size};
     constexpr auto kShellImageScaleUp = static_cast<SIIGBF>(0x00000100);
-    const auto flags = static_cast<SIIGBF>(SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK | kShellImageScaleUp);
+    auto flags = static_cast<SIIGBF>(SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK | kShellImageScaleUp);
+    if (IsImageAssetFile(iconSource)) {
+        flags = static_cast<SIIGBF>(SIIGBF_BIGGERSIZEOK | kShellImageScaleUp);
+    }
     if (FAILED(imageFactory->GetImage(requestedSize, flags, &bitmap)) || !bitmap) {
         return nullptr;
     }
