@@ -75,6 +75,22 @@ void LogIconAttempt(const ApplicationGroup& app, const std::vector<std::wstring>
     LogIconResolution(app, iconSources, L"attempt", {});
 }
 
+std::wstring StableIconCacheKey(const ApplicationGroup& app) {
+    if (!app.id.empty()) {
+        return ToLower(app.id);
+    }
+
+    if (!app.iconPath.empty()) {
+        return ToLower(app.iconPath);
+    }
+
+    if (!app.launchCommand.empty()) {
+        return ToLower(app.launchCommand);
+    }
+
+    return ToLower(app.displayName);
+}
+
 std::wstring ExpandEnvironment(std::wstring value) {
     if (value.empty()) {
         return {};
@@ -446,6 +462,23 @@ void AddWindowsAppsPackageCandidates(
     AddGenericPackageLogoCandidates(candidates, seen, packageRoot);
 }
 
+bool MatchesText(const ApplicationGroup& app, const std::wstring& text) {
+    const auto combined = ToLower(app.displayName + L" " + app.id + L" " + app.launchCommand + L" " + app.iconPath);
+    return combined.find(text) != std::wstring::npos;
+}
+
+void AddKnownShellAppCandidates(
+    std::vector<std::wstring>& candidates,
+    std::set<std::wstring>& seen,
+    const ApplicationGroup& app) {
+    if (MatchesText(app, L"settings") || MatchesText(app, L"immersivecontrolpanel") || MatchesText(app, L"ms-settings")) {
+        AddCandidate(
+            candidates,
+            seen,
+            L"shell:AppsFolder\\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel");
+    }
+}
+
 bool IsShellNamespacePath(const std::wstring& value) {
     const auto lower = ToLower(value);
     return lower.rfind(L"shell:", 0) == 0 || lower.rfind(L"::{", 0) == 0;
@@ -526,6 +559,7 @@ std::vector<std::wstring> ResolveIconSources(const ApplicationGroup& app) {
     std::vector<std::wstring> candidates;
     std::set<std::wstring> seen;
     AddCandidate(candidates, seen, AppsFolderPathFromAumid(app.id));
+    AddKnownShellAppCandidates(candidates, seen, app);
     AddWindowsAppsPackageCandidates(candidates, seen, app.iconPath);
     AddWindowsAppsPackageCandidates(candidates, seen, app.launchCommand);
     AddCandidate(candidates, seen, app.iconPath);
@@ -723,14 +757,14 @@ IconCache::~IconCache() {
 }
 
 HICON IconCache::IconFor(const ApplicationGroup& app) {
-    const auto iconSources = ResolveIconSources(app);
-    LogIconAttempt(app, iconSources);
-
-    const std::wstring key = ToLower(!iconSources.empty() ? iconSources.front() : app.id);
+    const std::wstring key = StableIconCacheKey(app);
     const auto existing = icons_.find(key);
     if (existing != icons_.end()) {
         return existing->second;
     }
+
+    const auto iconSources = ResolveIconSources(app);
+    LogIconAttempt(app, iconSources);
 
     std::wstring resolvedSource;
     const wchar_t* resolvedMethod = L"default";
