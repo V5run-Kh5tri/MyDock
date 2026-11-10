@@ -39,7 +39,11 @@ void LogIconFallback(const ApplicationGroup& app, const std::vector<std::wstring
 bool ShouldLogIconDetails(const ApplicationGroup& app) {
     const auto combined = ToLower(app.displayName + L" " + app.id + L" " + app.launchCommand + L" " + app.iconPath);
     return combined.find(L"whatsapp") != std::wstring::npos ||
-           combined.find(L"settings") != std::wstring::npos;
+           combined.find(L"settings") != std::wstring::npos ||
+           combined.find(L"systemsettings") != std::wstring::npos ||
+           combined.find(L"immersivecontrolpanel") != std::wstring::npos ||
+           combined.find(L"windows.immersivecontrolpanel") != std::wstring::npos ||
+           combined.find(L"ms-settings") != std::wstring::npos;
 }
 
 void LogIconResolution(
@@ -476,6 +480,26 @@ void AddKnownShellAppCandidates(
             candidates,
             seen,
             L"shell:AppsFolder\\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel");
+        AddCandidate(
+            candidates,
+            seen,
+            L"%SystemRoot%\\ImmersiveControlPanel\\SystemSettings.exe");
+        AddCandidate(
+            candidates,
+            seen,
+            L"%SystemRoot%\\SystemApps\\Microsoft.Windows.ImmersiveControlPanel_cw5n1h2txyewy\\SystemSettings.exe");
+
+        const std::filesystem::path immersiveRoot = ExpandEnvironment(L"%SystemRoot%\\ImmersiveControlPanel");
+        const std::filesystem::path systemAppRoot =
+            ExpandEnvironment(L"%SystemRoot%\\SystemApps\\Microsoft.Windows.ImmersiveControlPanel_cw5n1h2txyewy");
+
+        AddPackageAssetCandidates(candidates, seen, immersiveRoot, L"Assets\\Square44x44Logo.png");
+        AddPackageAssetCandidates(candidates, seen, immersiveRoot, L"Assets\\Square150x150Logo.png");
+        AddGenericPackageLogoCandidates(candidates, seen, immersiveRoot);
+
+        AddPackageAssetCandidates(candidates, seen, systemAppRoot, L"Assets\\Square44x44Logo.png");
+        AddPackageAssetCandidates(candidates, seen, systemAppRoot, L"Assets\\Square150x150Logo.png");
+        AddGenericPackageLogoCandidates(candidates, seen, systemAppRoot);
     }
 }
 

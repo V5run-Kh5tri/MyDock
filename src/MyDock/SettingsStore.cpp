@@ -118,13 +118,26 @@ std::wstring ShortcutDisplayName(const std::filesystem::path& shortcutPath) {
     return displayName.empty() ? shortcutPath.filename().wstring() : displayName;
 }
 
-void LogWhatsAppShortcut(
+bool ShouldLogShortcutDetails(
     const std::filesystem::path& shortcut,
     const std::wstring& target,
     const std::wstring& iconPath,
     const std::wstring& appUserModelId) {
     const auto combined = ToLower(shortcut.wstring() + L" " + target + L" " + iconPath + L" " + appUserModelId);
-    if (combined.find(L"whatsapp") == std::wstring::npos) {
+    return combined.find(L"whatsapp") != std::wstring::npos ||
+           combined.find(L"settings") != std::wstring::npos ||
+           combined.find(L"systemsettings") != std::wstring::npos ||
+           combined.find(L"immersivecontrolpanel") != std::wstring::npos ||
+           combined.find(L"windows.immersivecontrolpanel") != std::wstring::npos ||
+           combined.find(L"ms-settings") != std::wstring::npos;
+}
+
+void LogShortcutDetails(
+    const std::filesystem::path& shortcut,
+    const std::wstring& target,
+    const std::wstring& iconPath,
+    const std::wstring& appUserModelId) {
+    if (!ShouldLogShortcutDetails(shortcut, target, iconPath, appUserModelId)) {
         return;
     }
 
@@ -138,7 +151,7 @@ void LogWhatsAppShortcut(
         return;
     }
 
-    log << L"Native taskbar shortcut for WhatsApp\n";
+    log << L"Native taskbar shortcut for tracked app\n";
     log << L"  shortcut: " << shortcut.wstring() << L"\n";
     log << L"  target: " << target << L"\n";
     log << L"  iconPath: " << iconPath << L"\n";
@@ -226,7 +239,7 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
         if (iconPath.empty()) {
             iconPath = shortcut.wstring();
         }
-        LogWhatsAppShortcut(shortcut, launchCommand, iconPath, appUserModelId);
+        LogShortcutDetails(shortcut, launchCommand, iconPath, appUserModelId);
 
         PinnedAppDefinition app;
         app.displayName = ShortcutDisplayName(shortcut);
