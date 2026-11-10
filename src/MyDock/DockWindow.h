@@ -127,7 +127,6 @@ private:
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> mutedBrush_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> timeFormat_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> dateFormat_;
-    Microsoft::WRL::ComPtr<IDWriteTextFormat> iconFormat_;
     std::map<HICON, Microsoft::WRL::ComPtr<ID2D1Bitmap>> iconBitmaps_;
 
     std::vector<ApplicationGroup> applications_;

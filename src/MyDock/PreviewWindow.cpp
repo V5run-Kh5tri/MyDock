@@ -143,7 +143,6 @@ void PreviewWindow::Paint() {
 
     HBRUSH background = CreateSolidBrush(RGB(32, 34, 38));
     HBRUSH rowBrush = CreateSolidBrush(RGB(47, 50, 56));
-    HBRUSH borderBrush = CreateSolidBrush(RGB(105, 108, 118));
     HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(105, 108, 118));
     HFONT titleFont = CreateTitleFont();
 
@@ -178,7 +177,6 @@ void PreviewWindow::Paint() {
 
     DeleteObject(titleFont);
     DeleteObject(borderPen);
-    DeleteObject(borderBrush);
     DeleteObject(rowBrush);
     DeleteObject(background);
 

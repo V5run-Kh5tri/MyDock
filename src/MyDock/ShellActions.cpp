@@ -6,16 +6,24 @@ namespace MyDock::ShellActions {
 
 namespace {
 
+INPUT KeyInput(WORD key, bool keyUp) {
+    INPUT input = {};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = key;
+    input.ki.dwFlags = keyUp ? KEYEVENTF_KEYUP : 0;
+    return input;
+}
+
+// SendInput queues the whole chord atomically (keybd_event is deprecated and can interleave with
+// real input).
 void SendWinShortcut(WORD key) {
-    keybd_event(VK_LWIN, 0, 0, 0);
-    keybd_event(static_cast<BYTE>(key), 0, 0, 0);
-    keybd_event(static_cast<BYTE>(key), 0, KEYEVENTF_KEYUP, 0);
-    keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+    INPUT inputs[] = {KeyInput(VK_LWIN, false), KeyInput(key, false), KeyInput(key, true), KeyInput(VK_LWIN, true)};
+    SendInput(_countof(inputs), inputs, sizeof(INPUT));
 }
 
 void SendKeyPress(WORD key) {
-    keybd_event(static_cast<BYTE>(key), 0, 0, 0);
-    keybd_event(static_cast<BYTE>(key), 0, KEYEVENTF_KEYUP, 0);
+    INPUT inputs[] = {KeyInput(key, false), KeyInput(key, true)};
+    SendInput(_countof(inputs), inputs, sizeof(INPUT));
 }
 
 } // namespace
@@ -74,10 +82,6 @@ void ActivateWindow(HWND hwnd) {
     }
 
     SetForegroundWindow(hwnd);
-}
-
-void ToggleWindowState(HWND hwnd) {
-    ToggleWindowState(hwnd, GetAncestor(GetForegroundWindow(), GA_ROOT));
 }
 
 void ToggleWindowState(HWND hwnd, HWND activeWindow) {

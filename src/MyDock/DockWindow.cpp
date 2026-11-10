@@ -629,15 +629,6 @@ bool DockWindow::CreateDeviceResources() {
             12.0f,
             L"",
             dateFormat_.GetAddressOf());
-        dwriteFactory_->CreateTextFormat(
-            L"Segoe Fluent Icons",
-            nullptr,
-            DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            20.0f,
-            L"",
-            iconFormat_.GetAddressOf());
 
         if (timeFormat_) {
             timeFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -647,17 +638,12 @@ bool DockWindow::CreateDeviceResources() {
             dateFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             dateFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
-        if (iconFormat_) {
-            iconFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            iconFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        }
     }
 
     return true;
 }
 
 void DockWindow::DiscardDeviceResources() {
-    iconFormat_.Reset();
     dateFormat_.Reset();
     timeFormat_.Reset();
     mutedBrush_.Reset();

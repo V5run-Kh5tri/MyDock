@@ -37,13 +37,48 @@ std::filesystem::path AppDataFolder() {
     return RoamingAppDataFolder() / L"MyDock";
 }
 
+// Pin fields are separated by '|'; escape '%' and '|' inside fields so names and paths containing
+// them round-trip. Only these two exact sequences are decoded, so older files (which may contain
+// e.g. %SystemRoot%) still load unchanged.
+std::wstring EscapeField(const std::wstring& value) {
+    std::wstring escaped;
+    escaped.reserve(value.size());
+    for (const wchar_t ch : value) {
+        if (ch == L'%') {
+            escaped += L"%25";
+        } else if (ch == L'|') {
+            escaped += L"%7C";
+        } else {
+            escaped += ch;
+        }
+    }
+    return escaped;
+}
+
+std::wstring UnescapeField(const std::wstring& value) {
+    std::wstring result;
+    result.reserve(value.size());
+    for (size_t index = 0; index < value.size(); ++index) {
+        if (value.compare(index, 3, L"%25") == 0) {
+            result += L'%';
+            index += 2;
+        } else if (value.compare(index, 3, L"%7C") == 0 || value.compare(index, 3, L"%7c") == 0) {
+            result += L'|';
+            index += 2;
+        } else {
+            result += value[index];
+        }
+    }
+    return result;
+}
+
 std::vector<std::wstring> Split(const std::wstring& line, wchar_t delimiter) {
     std::vector<std::wstring> values;
     std::wistringstream stream(line);
     std::wstring item;
 
     while (std::getline(stream, item, delimiter)) {
-        values.push_back(Trim(item));
+        values.push_back(UnescapeField(Trim(item)));
     }
 
     return values;
@@ -441,16 +476,16 @@ bool SettingsStore::Save() const {
     }
 
     for (const auto& app : manualPinnedApps_) {
-        file << L"manualPin=" << app.displayName << L"|"
-             << ToLower(app.id) << L"|"
-             << app.launchCommand << L"|"
-             << app.iconPath << L"|"
-             << app.iconIdentity.appUserModelId << L"|"
-             << app.iconIdentity.shortcutPath << L"|"
-             << app.iconIdentity.iconResourcePath << L"|"
+        file << L"manualPin=" << EscapeField(app.displayName) << L"|"
+             << EscapeField(ToLower(app.id)) << L"|"
+             << EscapeField(app.launchCommand) << L"|"
+             << EscapeField(app.iconPath) << L"|"
+             << EscapeField(app.iconIdentity.appUserModelId) << L"|"
+             << EscapeField(app.iconIdentity.shortcutPath) << L"|"
+             << EscapeField(app.iconIdentity.iconResourcePath) << L"|"
              << app.iconIdentity.iconResourceIndex << L"|"
-             << app.iconIdentity.shellItemPath << L"|"
-             << app.iconIdentity.executablePath << L"\n";
+             << EscapeField(app.iconIdentity.shellItemPath) << L"|"
+             << EscapeField(app.iconIdentity.executablePath) << L"\n";
     }
 
     return true;
