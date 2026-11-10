@@ -74,7 +74,6 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="AppContextMenuWindow.cpp" />
     <ClCompile Include="App.cpp" />
     <ClCompile Include="DockWindow.cpp" />
     <ClCompile Include="IconCache.cpp" />
@@ -89,7 +88,6 @@
     <ClCompile Include="WindowTracker.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="AppContextMenuWindow.h" />
     <ClInclude Include="App.h" />
     <ClInclude Include="DockWindow.h" />
     <ClInclude Include="IconCache.h" />

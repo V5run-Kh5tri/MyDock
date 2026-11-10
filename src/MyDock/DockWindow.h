@@ -1,6 +1,5 @@
 #pragma once
 
-#include "AppContextMenuWindow.h"
 #include "IconCache.h"
 #include "NativeTaskbarController.h"
 #include "PinnedApps.h"
@@ -82,7 +81,6 @@ private:
     IconCache& iconCache_;
     PreviewWindow previewWindow_;
     SettingsWindow settingsWindow_;
-    AppContextMenuWindow appContextMenuWindow_;
     NativeTaskbarController taskbarController_;
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory_;
@@ -116,9 +114,9 @@ private:
     std::wstring tooltipText_;
     bool mouseInside_ = false;
     bool hidden_ = false;
+    bool menuActive_ = false;
     bool previewAvailable_ = false;
     bool settingsAvailable_ = false;
-    bool appContextMenuAvailable_ = false;
     int currentY_ = 0;
     std::chrono::steady_clock::time_point lastInsideTime_ = std::chrono::steady_clock::now();
 };

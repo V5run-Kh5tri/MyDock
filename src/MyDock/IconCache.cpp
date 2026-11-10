@@ -33,34 +33,6 @@ void LogIconFallback(const ApplicationGroup& app, const std::vector<std::wstring
     }
 }
 
-bool ShouldLogIconDetails(const ApplicationGroup& app) {
-    const auto name = ToLower(app.displayName + L" " + app.id + L" " + app.launchCommand + L" " + app.iconPath);
-    return name.find(L"whatsapp") != std::wstring::npos;
-}
-
-void LogIconResolution(const ApplicationGroup& app, const std::vector<std::wstring>& iconSources, const wchar_t* method, const std::wstring& source) {
-    if (!ShouldLogIconDetails(app)) {
-        return;
-    }
-
-    wchar_t tempPath[MAX_PATH] = {};
-    if (GetTempPathW(_countof(tempPath), tempPath) == 0) {
-        return;
-    }
-
-    std::wofstream log(std::filesystem::path(tempPath) / L"MyDock-icons.log", std::ios::app);
-    if (!log.is_open()) {
-        return;
-    }
-
-    log << L"Icon resolution for: " << app.displayName << L" [" << app.id << L"]\n";
-    log << L"  method: " << method << L"\n";
-    log << L"  selected: " << source << L"\n";
-    for (const auto& candidate : iconSources) {
-        log << L"  candidate: " << candidate << L"\n";
-    }
-}
-
 std::wstring ExpandEnvironment(std::wstring value) {
     if (value.empty()) {
         return {};
@@ -351,51 +323,27 @@ HICON IconFromExtractIcon(const std::wstring& iconSource) {
     return nullptr;
 }
 
-HICON ResolveIcon(const std::vector<std::wstring>& iconSources, std::wstring* resolvedSource, const wchar_t** resolvedMethod) {
+HICON ResolveIcon(const std::vector<std::wstring>& iconSources) {
     for (const auto& iconSource : iconSources) {
         if (HICON icon = IconFromShellItemImageFactory(iconSource, 256)) {
-            if (resolvedSource) {
-                *resolvedSource = iconSource;
-            }
-            if (resolvedMethod) {
-                *resolvedMethod = L"IShellItemImageFactory";
-            }
             return icon;
         }
     }
 
     for (const auto& iconSource : iconSources) {
         if (HICON icon = IconFromImageFile(iconSource, 256)) {
-            if (resolvedSource) {
-                *resolvedSource = iconSource;
-            }
-            if (resolvedMethod) {
-                *resolvedMethod = L"LoadImage ico";
-            }
             return icon;
         }
     }
 
     for (const auto& iconSource : iconSources) {
         if (HICON icon = IconFromShellFileInfo(iconSource)) {
-            if (resolvedSource) {
-                *resolvedSource = iconSource;
-            }
-            if (resolvedMethod) {
-                *resolvedMethod = L"SHGetFileInfo";
-            }
             return icon;
         }
     }
 
     for (const auto& iconSource : iconSources) {
         if (HICON icon = IconFromExtractIcon(iconSource)) {
-            if (resolvedSource) {
-                *resolvedSource = iconSource;
-            }
-            if (resolvedMethod) {
-                *resolvedMethod = L"ExtractIconEx";
-            }
             return icon;
         }
     }
@@ -417,14 +365,11 @@ HICON IconCache::IconFor(const ApplicationGroup& app) {
         return existing->second;
     }
 
-    std::wstring resolvedSource;
-    const wchar_t* resolvedMethod = L"default";
-    HICON icon = ResolveIcon(iconSources, &resolvedSource, &resolvedMethod);
+    HICON icon = ResolveIcon(iconSources);
     if (!icon) {
         LogIconFallback(app, iconSources);
         icon = LoadIconW(nullptr, IDI_APPLICATION);
     }
-    LogIconResolution(app, iconSources, resolvedMethod, resolvedSource);
 
     icons_[key] = icon;
     return icon;
