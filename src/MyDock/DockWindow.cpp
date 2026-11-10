@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -154,18 +153,6 @@ void LogDock(const wchar_t* message) {
     }
 }
 
-int LogDockCallbackException(UINT message, DWORD code) {
-    wchar_t buffer[256] = {};
-    swprintf_s(
-        buffer,
-        L"MyDock: DockWindow callback exception. message=0x%04X code=0x%08lX\n",
-        message,
-        code);
-    OutputDebugStringW(buffer);
-    LogDock(buffer);
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-
 } // namespace
 
 DockWindow::DockWindow(
@@ -289,25 +276,21 @@ void DockWindow::Show() {
 }
 
 LRESULT CALLBACK DockWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    __try {
-        auto* self = reinterpret_cast<DockWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    auto* self = reinterpret_cast<DockWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
-        if (message == WM_NCCREATE) {
-            const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
-            self = reinterpret_cast<DockWindow*>(create->lpCreateParams);
-            if (!self) {
-                return FALSE;
-            }
-
-            self->hwnd_ = hwnd;
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-            return TRUE;
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        self = reinterpret_cast<DockWindow*>(create->lpCreateParams);
+        if (!self) {
+            return FALSE;
         }
 
-        return self ? self->HandleMessage(message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
-    } __except (LogDockCallbackException(message, GetExceptionCode())) {
-        return 0;
+        self->hwnd_ = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        return TRUE;
     }
+
+    return self ? self->HandleMessage(message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
 LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
@@ -667,9 +650,6 @@ void DockWindow::PositionWindow(bool animate) {
 
     if (!settingsStore_.Current().autoHide) {
         hidden_ = false;
-    } else if (appContextMenuWindow_.IsVisible()) {
-        hidden_ = false;
-        lastInsideTime_ = now;
     } else if (cursorInDock || mouseInside_) {
         hidden_ = false;
         lastInsideTime_ = now;

@@ -3,7 +3,6 @@
 #include <Windowsx.h>
 
 #include <algorithm>
-#include <cstdio>
 #include <utility>
 
 namespace MyDock {
@@ -21,17 +20,6 @@ HFONT CreateMenuFont() {
         -15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-}
-
-int LogCallbackException(UINT message, DWORD code) {
-    wchar_t buffer[256] = {};
-    swprintf_s(
-        buffer,
-        L"MyDock: AppContextMenuWindow callback exception. message=0x%04X code=0x%08lX\n",
-        message,
-        code);
-    OutputDebugStringW(buffer);
-    return EXCEPTION_EXECUTE_HANDLER;
 }
 
 } // namespace
@@ -121,8 +109,6 @@ void AppContextMenuWindow::Hide() {
         ShowWindow(hwnd_, SW_HIDE);
     }
 
-    items_.clear();
-    onCommand_ = {};
     hoverIndex_ = -1;
 }
 
@@ -131,25 +117,21 @@ bool AppContextMenuWindow::IsVisible() const {
 }
 
 LRESULT CALLBACK AppContextMenuWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    __try {
-        auto* self = reinterpret_cast<AppContextMenuWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    auto* self = reinterpret_cast<AppContextMenuWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
-        if (message == WM_NCCREATE) {
-            const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
-            self = reinterpret_cast<AppContextMenuWindow*>(create->lpCreateParams);
-            if (!self) {
-                return FALSE;
-            }
-
-            self->hwnd_ = hwnd;
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-            return TRUE;
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        self = reinterpret_cast<AppContextMenuWindow*>(create->lpCreateParams);
+        if (!self) {
+            return FALSE;
         }
 
-        return self ? self->HandleMessage(message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
-    } __except (LogCallbackException(message, GetExceptionCode())) {
-        return 0;
+        self->hwnd_ = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        return TRUE;
     }
+
+    return self ? self->HandleMessage(message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
 LRESULT AppContextMenuWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
@@ -184,10 +166,9 @@ LRESULT AppContextMenuWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM 
         if (itemIndex >= 0 && itemIndex < static_cast<int>(items_.size())) {
             const auto item = items_[static_cast<size_t>(itemIndex)];
             if (!item.separator && item.enabled && item.command != 0) {
-                auto onCommand = onCommand_;
                 Hide();
-                if (onCommand) {
-                    onCommand(item.command);
+                if (onCommand_) {
+                    onCommand_(item.command);
                 }
             }
         }
