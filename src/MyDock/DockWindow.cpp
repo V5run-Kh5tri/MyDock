@@ -654,19 +654,15 @@ void DockWindow::PositionWindow(bool animate) {
         hidden_ = false;
         lastInsideTime_ = now;
     } else if (hidden_) {
-        const int workLeft = static_cast<int>(work.left);
-        const int workRight = static_cast<int>(work.right);
-        const int workBottom = static_cast<int>(work.bottom);
-        const int workWidth = workRight - workLeft;
         const int activationWidth = std::max(
-            static_cast<int>(dockSize_.cx),
-            static_cast<int>(workWidth * kHiddenActivationWidthRatio));
-        const int activationLeft = workLeft + (workWidth - activationWidth) / 2;
+            dockSize_.cx,
+            static_cast<int>((work.right - work.left) * kHiddenActivationWidthRatio));
+        const int activationLeft = work.left + ((work.right - work.left) - activationWidth) / 2;
         const RECT activationRect = {
             activationLeft,
-            workBottom - kHiddenActivationHeight,
+            work.bottom - kHiddenActivationHeight,
             activationLeft + activationWidth,
-            workBottom,
+            work.bottom,
         };
         if (PtInRect(&activationRect, cursor)) {
             hidden_ = false;

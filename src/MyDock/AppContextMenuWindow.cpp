@@ -76,29 +76,18 @@ void AppContextMenuWindow::Show(const std::vector<AppContextMenuItem>& items, co
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     }
 
-    const int menuWidth = static_cast<int>(size.cx);
-    const int menuHeight = static_cast<int>(size.cy);
-    const int workLeft = static_cast<int>(work.left);
-    const int workTop = static_cast<int>(work.top);
-    const int workRight = static_cast<int>(work.right);
-    const int workBottom = static_cast<int>(work.bottom);
-    const int anchorLeft = static_cast<int>(anchor.left);
-    const int anchorTop = static_cast<int>(anchor.top);
-    const int anchorRight = static_cast<int>(anchor.right);
-    const int anchorBottom = static_cast<int>(anchor.bottom);
+    int x = anchor.left + ((anchor.right - anchor.left) - size.cx) / 2;
+    x = std::max(work.left + 8, std::min(x, work.right - size.cx - 8));
 
-    int x = anchorLeft + ((anchorRight - anchorLeft) - menuWidth) / 2;
-    x = std::max(workLeft + 8, std::min(x, workRight - menuWidth - 8));
-
-    int y = anchorTop - menuHeight - 12;
-    if (y < workTop + 8) {
-        y = anchorBottom + 12;
+    int y = anchor.top - size.cy - 12;
+    if (y < work.top + 8) {
+        y = anchor.bottom + 12;
     }
-    y = std::max(workTop + 8, std::min(y, workBottom - menuHeight - 8));
+    y = std::max(work.top + 8, std::min(y, work.bottom - size.cy - 8));
 
-    HRGN region = CreateRoundRectRgn(0, 0, menuWidth + 1, menuHeight + 1, kCornerRadius * 2, kCornerRadius * 2);
+    HRGN region = CreateRoundRectRgn(0, 0, size.cx + 1, size.cy + 1, kCornerRadius * 2, kCornerRadius * 2);
     SetWindowRgn(hwnd_, region, TRUE);
-    SetWindowPos(hwnd_, HWND_TOPMOST, x, y, menuWidth, menuHeight, SWP_SHOWWINDOW);
+    SetWindowPos(hwnd_, HWND_TOPMOST, x, y, size.cx, size.cy, SWP_SHOWWINDOW);
     SetForegroundWindow(hwnd_);
     SetFocus(hwnd_);
     InvalidateRect(hwnd_, nullptr, TRUE);
