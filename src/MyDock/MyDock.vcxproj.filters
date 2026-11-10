@@ -11,6 +11,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="AppContextMenuWindow.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="App.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="DockWindow.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="IconCache.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -25,6 +26,7 @@
     <ClCompile Include="WindowTracker.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="AppContextMenuWindow.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="App.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="DockWindow.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="IconCache.h"><Filter>Header Files</Filter></ClInclude>

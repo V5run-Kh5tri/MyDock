@@ -43,6 +43,8 @@ constexpr int kMaxIconSize = 80;
 constexpr int kIconGap = 10;
 constexpr int kVisibleBottomMargin = 12;
 constexpr int kHiddenVisibleSliver = 6;
+constexpr int kHiddenActivationHeight = 22;
+constexpr float kHiddenActivationWidthRatio = 0.72f;
 constexpr int kTooltipDelayMs = 725;
 constexpr float kAnimationEase = 0.24f;
 constexpr float kFocusEase = 0.34f;
@@ -172,7 +174,8 @@ DockWindow::DockWindow(
           if (hwnd_) {
               InvalidateRect(hwnd_, nullptr, FALSE);
           }
-      }) {}
+      }),
+      appContextMenuWindow_(instance) {}
 
 bool DockWindow::Create() {
     LogDock(L"DockWindow::Create begin");
@@ -211,6 +214,9 @@ bool DockWindow::Create() {
 
     BOOL darkMode = TRUE;
     DwmSetWindowAttribute(hwnd_, 20, &darkMode, sizeof(darkMode));
+    constexpr DWORD kDwmwaSystemBackdropType = 38;
+    constexpr DWORD kDwmSystemBackdropTransientWindow = 3;
+    DwmSetWindowAttribute(hwnd_, kDwmwaSystemBackdropType, &kDwmSystemBackdropTransientWindow, sizeof(kDwmSystemBackdropTransientWindow));
     SetLayeredWindowAttributes(hwnd_, kTransparentKeyColor, 0, LWA_COLORKEY);
 
     tooltip_ = CreateWindowExW(
@@ -240,6 +246,11 @@ bool DockWindow::Create() {
     settingsAvailable_ = settingsWindow_.Create(hwnd_);
     if (!settingsAvailable_) {
         LogDock(L"SettingsWindow::Create failed; continuing without settings popup");
+    }
+
+    appContextMenuAvailable_ = appContextMenuWindow_.Create(hwnd_);
+    if (!appContextMenuAvailable_) {
+        LogDock(L"AppContextMenuWindow::Create failed; continuing without app context menu");
     }
 
     taskbarController_.Initialize(hwnd_);
@@ -438,10 +449,10 @@ bool DockWindow::CreateDeviceResources() {
             return false;
         }
 
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x18202A, 0.54f), surfaceBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x8FC8FF, 0.10f), surfaceAccentBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.18f), surfaceShadowBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.42f), borderBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x151D27, 0.42f), surfaceBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xB9D7F4, 0.16f), surfaceAccentBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.20f), surfaceShadowBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.55f), borderBrush_.GetAddressOf());
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xF5F7FB, 0.98f), textBrush_.GetAddressOf());
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xBCC3CE, 0.88f), mutedBrush_.GetAddressOf());
 
@@ -642,12 +653,27 @@ void DockWindow::PositionWindow(bool animate) {
     } else if (cursorInDock || mouseInside_) {
         hidden_ = false;
         lastInsideTime_ = now;
+    } else if (hidden_) {
+        const int activationWidth = std::max(
+            dockSize_.cx,
+            static_cast<int>((work.right - work.left) * kHiddenActivationWidthRatio));
+        const int activationLeft = work.left + ((work.right - work.left) - activationWidth) / 2;
+        const RECT activationRect = {
+            activationLeft,
+            work.bottom - kHiddenActivationHeight,
+            activationLeft + activationWidth,
+            work.bottom,
+        };
+        if (PtInRect(&activationRect, cursor)) {
+            hidden_ = false;
+            lastInsideTime_ = now;
+        }
     } else if (now - lastInsideTime_ > std::chrono::milliseconds(850)) {
         hidden_ = true;
     }
 
-    if (!wasHidden && hidden_ && menuActive_) {
-        EndMenu();
+    if (!wasHidden && hidden_ && appContextMenuWindow_.IsVisible()) {
+        appContextMenuWindow_.Hide();
     }
 
     const int targetX = work.left + ((work.right - work.left) - dockSize_.cx) / 2;
@@ -739,7 +765,7 @@ void DockWindow::PaintDockSurface() {
 
     const auto highlight = D2D1::RoundedRect(RectF(1.0f, static_cast<float>(kSurfaceTop + 1), static_cast<float>(dockSize_.cx) - 1.0f, static_cast<float>(kSurfaceTop + 24)), 22.0f, 22.0f);
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> highlightBrush;
-    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.14f), highlightBrush.GetAddressOf());
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.22f), highlightBrush.GetAddressOf());
     renderTarget_->FillRoundedRectangle(highlight, highlightBrush.Get());
 }
 
@@ -1023,108 +1049,88 @@ void DockWindow::HandleRightClick(POINT point) {
 
 void DockWindow::ShowApplicationMenu(int appIndex, POINT point) {
     const ApplicationGroup app = applications_[static_cast<size_t>(appIndex)];
-    HMENU menu = CreatePopupMenu();
-    if (!menu) {
+    if (!appContextMenuAvailable_) {
         return;
     }
 
     const bool canLaunch = !app.launchCommand.empty();
     const bool hasWindows = !app.windows.empty();
 
+    std::vector<AppContextMenuItem> items;
     if (canLaunch) {
-        AppendMenuW(menu, MF_STRING, kMenuOpenOrNewWindow, hasWindows ? L"New window" : L"Open");
+        items.push_back({kMenuOpenOrNewWindow, hasWindows ? L"New window" : L"Open"});
     }
 
     if (hasWindows && previewAvailable_) {
-        AppendMenuW(menu, MF_STRING, kMenuShowWindows, app.windows.size() > 1 ? L"Show windows" : L"Show window");
+        items.push_back({kMenuShowWindows, app.windows.size() > 1 ? L"Show windows" : L"Show window"});
     }
 
     if (hasWindows) {
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kMenuCloseWindow, L"Close window");
+        items.push_back({0, {}, true, true});
+        items.push_back({kMenuCloseWindow, L"Close window"});
         if (app.windows.size() > 1) {
-            AppendMenuW(menu, MF_STRING, kMenuCloseAllWindows, L"Close all windows");
+            items.push_back({kMenuCloseAllWindows, L"Close all windows"});
         }
     }
 
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kMenuPinToggle, app.pinned ? L"Unpin from MyDock" : L"Pin to MyDock");
+    items.push_back({0, {}, true, true});
+    items.push_back({kMenuPinToggle, app.pinned ? L"Unpin from MyDock" : L"Pin to MyDock"});
 
-    POINT screenPoint = point;
-    ClientToScreen(hwnd_, &screenPoint);
-    SetForegroundWindow(hwnd_);
-
-    menuActive_ = true;
-    const UINT command = TrackPopupMenuEx(
-        menu,
-        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-        screenPoint.x,
-        screenPoint.y,
-        hwnd_,
-        nullptr);
-    menuActive_ = false;
-
-    DestroyMenu(menu);
-    PostMessageW(hwnd_, WM_NULL, 0, 0);
-
-    if (command == 0) {
-        return;
+    RECT anchor = {point.x - 1, point.y - 1, point.x + 1, point.y + 1};
+    if (appIndex >= 0 && appIndex < static_cast<int>(iconLayouts_.size())) {
+        anchor = ToRect(iconLayouts_[static_cast<size_t>(appIndex)].bounds);
     }
+    MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
 
-    auto primaryWindow = [&app]() -> HWND {
-        if (app.windows.empty()) {
-            return nullptr;
-        }
-
-        for (const auto& window : app.windows) {
-            if (ShellActions::IsWindowActive(window.hwnd)) {
-                return window.hwnd;
+    appContextMenuWindow_.Show(items, anchor, [this, app, anchor](UINT command) {
+        auto primaryWindow = [&app]() -> HWND {
+            if (app.windows.empty()) {
+                return nullptr;
             }
-        }
 
-        return app.windows.front().hwnd;
-    };
-
-    switch (command) {
-    case kMenuOpenOrNewWindow:
-        pinnedApps_.Launch(app);
-        break;
-    case kMenuShowWindows: {
-        RECT anchor = {point.x - 1, point.y - 1, point.x + 1, point.y + 1};
-        if (appIndex >= 0 && appIndex < static_cast<int>(iconLayouts_.size())) {
-            anchor = ToRect(iconLayouts_[static_cast<size_t>(appIndex)].bounds);
-        }
-        MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
-        previewWindow_.ShowFor(app, anchor);
-        break;
-    }
-    case kMenuCloseWindow: {
-        if (HWND hwnd = primaryWindow()) {
-            PostMessageW(hwnd, WM_CLOSE, 0, 0);
-        }
-        break;
-    }
-    case kMenuCloseAllWindows:
-        for (const auto& window : app.windows) {
-            if (IsWindow(window.hwnd)) {
-                PostMessageW(window.hwnd, WM_CLOSE, 0, 0);
+            for (const auto& window : app.windows) {
+                if (ShellActions::IsWindowActive(window.hwnd)) {
+                    return window.hwnd;
+                }
             }
+
+            return app.windows.front().hwnd;
+        };
+
+        switch (command) {
+        case kMenuOpenOrNewWindow:
+            pinnedApps_.Launch(app);
+            break;
+        case kMenuShowWindows:
+            previewWindow_.ShowFor(app, anchor);
+            break;
+        case kMenuCloseWindow:
+            if (HWND hwnd = primaryWindow()) {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            break;
+        case kMenuCloseAllWindows:
+            for (const auto& window : app.windows) {
+                if (IsWindow(window.hwnd)) {
+                    PostMessageW(window.hwnd, WM_CLOSE, 0, 0);
+                }
+            }
+            break;
+        case kMenuPinToggle:
+            if (app.pinned) {
+                pinnedApps_.Unpin(app);
+            } else {
+                pinnedApps_.Pin(app);
+            }
+            RefreshApplications();
+            iconBitmaps_.clear();
+            UpdateLayout(true);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            break;
+        default:
+            break;
         }
-        break;
-    case kMenuPinToggle:
-        if (app.pinned) {
-            pinnedApps_.Unpin(app);
-        } else {
-            pinnedApps_.Pin(app);
-        }
-        RefreshApplications();
-        iconBitmaps_.clear();
-        UpdateLayout(true);
-        InvalidateRect(hwnd_, nullptr, FALSE);
-        break;
-    default:
-        break;
-    }
+    });
 }
 
 void DockWindow::UpdateHover(POINT point) {

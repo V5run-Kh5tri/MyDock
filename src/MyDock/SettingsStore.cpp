@@ -132,18 +132,6 @@ std::wstring ShortcutTarget(const std::filesystem::path& shortcutPath, std::wstr
     wchar_t target[MAX_PATH] = {};
     shellLink->GetPath(target, _countof(target), nullptr, SLGP_RAWPATH);
 
-    if (iconPath) {
-        wchar_t iconLocation[MAX_PATH] = {};
-        int iconIndex = 0;
-        if (SUCCEEDED(shellLink->GetIconLocation(iconLocation, _countof(iconLocation), &iconIndex)) && iconLocation[0] != L'\0') {
-            *iconPath = iconLocation;
-        }
-    }
-
-    if (target[0] != L'\0') {
-        return target;
-    }
-
     Microsoft::WRL::ComPtr<IPropertyStore> properties;
     if (SUCCEEDED(shellLink.As(&properties))) {
         PROPVARIANT value = {};
@@ -156,6 +144,18 @@ std::wstring ShortcutTarget(const std::filesystem::path& shortcutPath, std::wstr
             return {};
         }
         PropVariantClear(&value);
+    }
+
+    if (iconPath) {
+        wchar_t iconLocation[MAX_PATH] = {};
+        int iconIndex = 0;
+        if (SUCCEEDED(shellLink->GetIconLocation(iconLocation, _countof(iconLocation), &iconIndex)) && iconLocation[0] != L'\0') {
+            *iconPath = iconLocation;
+        }
+    }
+
+    if (target[0] != L'\0') {
+        return target;
     }
 
     return {};
