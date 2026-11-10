@@ -10,6 +10,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -44,11 +45,17 @@ constexpr int kMaxIconSize = 80;
 constexpr int kIconGap = 10;
 constexpr int kVisibleBottomMargin = 12;
 constexpr int kHiddenVisibleSliver = 6;
+// When auto-hidden, the dock is revealed by touching the bottom edge anywhere within this zone:
+// centred, at least as wide as the dock and covering this share of the monitor width.
+constexpr int kHiddenActivationHeight = 8;
+constexpr float kHiddenActivationWidthRatio = 0.7f;
 constexpr int kTooltipDelayMs = 725;
 constexpr float kAnimationEase = 0.24f;
 constexpr float kFocusEase = 0.34f;
 constexpr float kIconRestingBottom = 80.0f;
-constexpr COLORREF kTransparentKeyColor = 0x00030201;
+// The blur backdrop is inset under the glass rim so its aliased (region-clipped) edge is hidden
+// beneath the dock's anti-aliased border.
+constexpr int kBackdropInset = 1;
 
 float ScaleForDistance(float distance) {
     const float normalized = std::min(std::abs(distance), 2.75f) / 2.75f;
@@ -171,10 +178,14 @@ DockWindow::DockWindow(
           ApplySettings();
           hidden_ = false;
           PositionWindow(false);
-          if (hwnd_) {
-              InvalidateRect(hwnd_, nullptr, FALSE);
-          }
-      }) {}
+          RequestRender();
+      }),
+      backdrop_(instance) {}
+
+DockWindow::~DockWindow() {
+    backdrop_.Destroy();
+    ReleaseSurfaceBitmap();
+}
 
 bool DockWindow::Create() {
     LogDock(L"DockWindow::Create begin");
@@ -213,7 +224,15 @@ bool DockWindow::Create() {
 
     BOOL darkMode = TRUE;
     DwmSetWindowAttribute(hwnd_, 20, &darkMode, sizeof(darkMode));
-    SetLayeredWindowAttributes(hwnd_, kTransparentKeyColor, 0, LWA_COLORKEY);
+    // The dock is a per-pixel-alpha layered window (UpdateLayeredWindow, see Render()), so
+    // translucent glass layers blend correctly with what is behind them. Fully transparent pixels
+    // (the headroom above the surface) stay click-through, as with the old colour key.
+
+    if (!backdrop_.Create()) {
+        LogDock(L"GlassBackdrop::Create failed; continuing without blur");
+    } else if (!backdrop_.BlurEnabled()) {
+        LogDock(L"Glass blur unavailable; continuing with translucent tint only");
+    }
 
     tooltip_ = CreateWindowExW(
         WS_EX_TOPMOST,
@@ -265,10 +284,10 @@ bool DockWindow::Create() {
 
 void DockWindow::Show() {
     PositionWindow(false);
+    Render(); // A layered window shows nothing until its first UpdateLayeredWindow.
     ShowWindow(hwnd_, SW_SHOW);
     SetForegroundWindow(hwnd_);
-    UpdateWindow(hwnd_);
-    RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    PlaceBackdrop();
 }
 
 LRESULT CALLBACK DockWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -299,14 +318,16 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case kMenuCommandMessage:
         ExecuteMenuCommand(static_cast<UINT>(wParam));
         return 0;
-    case WM_SIZE:
-        if (renderTarget_) {
-            renderTarget_->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam)));
+    case WM_PAINT: {
+        // Layered (UpdateLayeredWindow) windows are not painted through the DC; just validate.
+        PAINTSTRUCT paint = {};
+        BeginPaint(hwnd_, &paint);
+        EndPaint(hwnd_, &paint);
+        if (renderPending_) {
+            Render();
         }
         return 0;
-    case WM_PAINT:
-        Paint();
-        return 0;
+    }
     case WM_DISPLAYCHANGE:
     case WM_DPICHANGED:
         UpdateLayout(true);
@@ -330,7 +351,7 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         HideTooltip();
         KillTimer(hwnd_, kTooltipTimer);
         UpdateLayout(true);
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        RequestRender();
         return 0;
     case WM_LBUTTONDOWN:
         foregroundBeforeClick_ = GetAncestor(GetForegroundWindow(), GA_ROOT);
@@ -356,11 +377,15 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             RefreshApplications();
             UpdateLayout(true);
             taskbarController_.ReapplyIfEnabled();
-            InvalidateRect(hwnd_, nullptr, FALSE);
+            // Re-assert z-order once a second rather than on every animation frame. Owned popups
+            // (context menu, previews) stay above the dock; the backdrop goes right below it.
+            SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            PlaceBackdrop();
+            RequestRender();
             return 0;
         }
         if (wParam == kClockTimer) {
-            InvalidateRect(hwnd_, nullptr, FALSE);
+            RequestRender();
             return 0;
         }
         if (wParam == kAutoHideTimer) {
@@ -373,6 +398,10 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         if (wParam == kAnimationTimer) {
             StepAnimation();
+            // Backstop in case WM_PAINT is not generated for the layered window.
+            if (renderPending_) {
+                Render();
+            }
             return 0;
         }
         break;
@@ -391,7 +420,9 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         KillTimer(hwnd_, kTooltipTimer);
         KillTimer(hwnd_, kAnimationTimer);
         taskbarController_.Shutdown();
+        backdrop_.Destroy();
         DiscardDeviceResources();
+        ReleaseSurfaceBitmap();
         PostQuitMessage(0);
         return 0;
     }
@@ -410,7 +441,7 @@ void DockWindow::RestoreNativeTaskbarEmergency() {
 
     hidden_ = false;
     PositionWindow(false);
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    RequestRender();
 }
 
 bool DockWindow::CreateDeviceResources() {
@@ -440,26 +471,83 @@ bool DockWindow::CreateDeviceResources() {
     }
 
     if (!renderTarget_) {
-        RECT client = {};
-        GetClientRect(hwnd_, &client);
-
-        if (FAILED(d2dFactory_->CreateHwndRenderTarget(
-                D2D1::RenderTargetProperties(
-                    D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                    D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_PREMULTIPLIED)),
-                D2D1::HwndRenderTargetProperties(
-                    hwnd_,
-                    D2D1::SizeU(client.right - client.left, client.bottom - client.top)),
-                renderTarget_.GetAddressOf()))) {
+        // Renders into a premultiplied 32bpp DIB that Render() presents with UpdateLayeredWindow.
+        const auto properties = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        if (FAILED(d2dFactory_->CreateDCRenderTarget(&properties, renderTarget_.GetAddressOf()))) {
             return false;
         }
 
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x18202A, 0.54f), surfaceBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x8FC8FF, 0.10f), surfaceAccentBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.18f), surfaceShadowBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.42f), borderBrush_.GetAddressOf());
+        // ClearType needs an opaque background; on a transparent surface it produces colour fringes.
+        renderTarget_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+
+        const auto white = [](float alpha) {
+            return D2D1::ColorF(1.0f, 1.0f, 1.0f, alpha);
+        };
+        const auto createStops = [this](std::initializer_list<D2D1_GRADIENT_STOP> stops, ID2D1GradientStopCollection** collection) {
+            return SUCCEEDED(renderTarget_->CreateGradientStopCollection(
+                stops.begin(), static_cast<UINT32>(stops.size()), collection));
+        };
+        const auto createVerticalBrush = [this, &createStops](
+                                             std::initializer_list<D2D1_GRADIENT_STOP> stops,
+                                             float top,
+                                             float bottom,
+                                             ID2D1LinearGradientBrush** brush) {
+            Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> collection;
+            if (createStops(stops, collection.GetAddressOf())) {
+                renderTarget_->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, top), D2D1::Point2F(0.0f, bottom)),
+                    collection.Get(),
+                    brush);
+            }
+        };
+
+        constexpr float surfaceTop = static_cast<float>(kSurfaceTop);
+        constexpr float surfaceBottom = static_cast<float>(kSurfaceBottom);
+
+        // Liquid glass layers, painted over the live blur from GlassBackdrop:
+        // a light cool tint for legibility on bright wallpapers,
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x121821, 0.30f), glassTintBrush_.GetAddressOf());
+        // a soft contact shadow under the slab,
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.07f), glassShadowBrush_.GetAddressOf());
+        // a sheen on the upper half, as if lit from above,
+        createVerticalBrush(
+            {{0.0f, white(0.22f)}, {0.6f, white(0.05f)}, {1.0f, white(0.0f)}},
+            surfaceTop,
+            surfaceTop + kSurfaceHeight * 0.55f,
+            glassSheenBrush_.GetAddressOf());
+        // a specular rim: bright at the top edge, faint on the sides, catching light again at the
+        // bottom where a thick glass edge would refract it,
+        createVerticalBrush(
+            {{0.0f, white(0.75f)}, {0.22f, white(0.26f)}, {0.6f, white(0.08f)}, {1.0f, white(0.32f)}},
+            surfaceTop,
+            surfaceBottom,
+            glassRimBrush_.GetAddressOf());
+        // an inner bevel that suggests thickness,
+        createVerticalBrush(
+            {{0.0f, white(0.22f)}, {0.35f, white(0.0f)}, {0.8f, white(0.0f)}, {1.0f, white(0.12f)}},
+            surfaceTop,
+            surfaceBottom,
+            glassInnerRimBrush_.GetAddressOf());
+        // luminous left/right edges (the brush is built per frame because the dock width changes),
+        createStops(
+            {{0.0f, white(0.14f)}, {0.035f, white(0.0f)}, {0.965f, white(0.0f)}, {1.0f, white(0.14f)}},
+            glassEdgeStops_.GetAddressOf());
+        // and a specular glint near the top-left corner.
+        {
+            Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> collection;
+            if (createStops({{0.0f, white(0.45f)}, {1.0f, white(0.0f)}}, collection.GetAddressOf())) {
+                renderTarget_->CreateRadialGradientBrush(
+                    D2D1::RadialGradientBrushProperties(D2D1::Point2F(92.0f, surfaceTop + 3.0f), D2D1::Point2F(0.0f, 0.0f), 112.0f, 16.0f),
+                    collection.Get(),
+                    glassGlintBrush_.GetAddressOf());
+            }
+        }
+
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.28f), borderBrush_.GetAddressOf());
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xF5F7FB, 0.98f), textBrush_.GetAddressOf());
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xBCC3CE, 0.88f), mutedBrush_.GetAddressOf());
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xD5DBE3, 0.92f), mutedBrush_.GetAddressOf());
 
         dwriteFactory_->CreateTextFormat(
             L"Segoe UI",
@@ -513,9 +601,13 @@ void DockWindow::DiscardDeviceResources() {
     mutedBrush_.Reset();
     textBrush_.Reset();
     borderBrush_.Reset();
-    surfaceShadowBrush_.Reset();
-    surfaceAccentBrush_.Reset();
-    surfaceBrush_.Reset();
+    glassEdgeStops_.Reset();
+    glassGlintBrush_.Reset();
+    glassInnerRimBrush_.Reset();
+    glassRimBrush_.Reset();
+    glassSheenBrush_.Reset();
+    glassShadowBrush_.Reset();
+    glassTintBrush_.Reset();
     iconBitmaps_.clear();
     renderTarget_.Reset();
 }
@@ -641,25 +733,10 @@ void DockWindow::UpdateLayout(bool reposition) {
     startSearchRect_ = {kSystemSectionWidth, kSurfaceTop + 20, kSystemSectionWidth + 30, kSurfaceTop + 50};
     dividerRect_ = {kFixedSectionWidth - 1, kSurfaceTop + 12, kFixedSectionWidth, kSurfaceBottom - 12};
 
-    HRGN region = CreateRoundRectRgn(0, 0, dockSize_.cx + 1, dockSize_.cy + 1, kSurfaceRadius * 2, kSurfaceRadius * 2);
-    SetWindowRgn(hwnd_, region, TRUE);
-
-    SetWindowPos(
-        hwnd_,
-        HWND_TOPMOST,
-        0,
-        0,
-        dockSize_.cx,
-        dockSize_.cy,
-        SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-
-    if (renderTarget_) {
-        renderTarget_->Resize(D2D1::SizeU(dockSize_.cx, dockSize_.cy));
-    }
-
     if (reposition) {
         PositionWindow(false);
     }
+    RequestRender();
 }
 
 void DockWindow::PositionWindow(bool animate) {
@@ -676,10 +753,28 @@ void DockWindow::PositionWindow(bool animate) {
     const auto now = std::chrono::steady_clock::now();
     const bool wasHidden = hidden_;
 
+    // Reveal zone along the bottom edge while hidden: much wider than the dock itself, so the
+    // cursor does not have to find the thin sliver exactly.
+    const int workWidth = static_cast<int>(work.right - work.left);
+    const int activationWidth = std::min(
+        workWidth,
+        std::max(static_cast<int>(dockSize_.cx), static_cast<int>(workWidth * kHiddenActivationWidthRatio)));
+    const int activationLeft = static_cast<int>(work.left) + (workWidth - activationWidth) / 2;
+    const RECT activationZone = {
+        activationLeft,
+        work.bottom - kHiddenActivationHeight,
+        activationLeft + activationWidth,
+        work.bottom,
+    };
+    const bool cursorInActivationZone = PtInRect(&activationZone, cursor) != FALSE;
+
     if (!settingsStore_.Current().autoHide) {
         hidden_ = false;
     } else if (cursorInDock || mouseInside_ || contextMenu_.IsVisible()) {
         // Keep the dock up while its context menu is open, even though the cursor is over the menu.
+        hidden_ = false;
+        lastInsideTime_ = now;
+    } else if (hidden_ && cursorInActivationZone) {
         hidden_ = false;
         lastInsideTime_ = now;
     } else if (now - lastInsideTime_ > std::chrono::milliseconds(850)) {
@@ -706,29 +801,46 @@ void DockWindow::PositionWindow(bool animate) {
         }
     }
 
-    SetWindowPos(
-        hwnd_,
-        HWND_TOPMOST,
-        targetX,
-        currentY_,
-        dockSize_.cx,
-        dockSize_.cy,
-        SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-}
-
-void DockWindow::Paint() {
-    PAINTSTRUCT paint = {};
-    HDC paintDc = BeginPaint(hwnd_, &paint);
-
-    if (!CreateDeviceResources()) {
-        PaintFallback(paintDc);
-        EndPaint(hwnd_, &paint);
+    if (dockPosition_.x == targetX && dockPosition_.y == currentY_) {
         return;
     }
-    EndPaint(hwnd_, &paint);
+
+    // Moving does not need a re-render: shift the existing layered content and the blur together.
+    dockPosition_ = {targetX, currentY_};
+    SetWindowPos(hwnd_, nullptr, dockPosition_.x, dockPosition_.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    PlaceBackdrop();
+}
+
+void DockWindow::RequestRender() {
+    if (!hwnd_) {
+        return;
+    }
+
+    // Coalesced: rendered on the next WM_PAINT or animation tick, whichever comes first.
+    renderPending_ = true;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void DockWindow::Render() {
+    renderPending_ = false;
+    if (!hwnd_) {
+        return;
+    }
+
+    const int width = static_cast<int>(dockSize_.cx);
+    const int height = static_cast<int>(dockSize_.cy);
+    if (width <= 0 || height <= 0 || !CreateDeviceResources() || !EnsureSurfaceBitmap(width, height)) {
+        return;
+    }
+
+    const RECT bounds = {0, 0, width, height};
+    if (FAILED(renderTarget_->BindDC(surfaceDc_, &bounds))) {
+        return;
+    }
 
     renderTarget_->BeginDraw();
-    renderTarget_->Clear(D2D1::ColorF(1.0f / 255.0f, 2.0f / 255.0f, 3.0f / 255.0f, 1.0f));
+    renderTarget_->SetTransform(D2D1::Matrix3x2F::Identity());
+    renderTarget_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
     PaintDockSurface();
     PaintSystemSection();
     PaintApplicationSection();
@@ -736,51 +848,146 @@ void DockWindow::Paint() {
     const HRESULT hr = renderTarget_->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         DiscardDeviceResources();
+        renderPending_ = true;
         return;
     }
+    if (FAILED(hr)) {
+        return;
+    }
+
+    POINT source = {0, 0};
+    POINT destination = dockPosition_;
+    SIZE size = {width, height};
+    BLENDFUNCTION blend = {};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+    UpdateLayeredWindow(hwnd_, nullptr, &destination, &size, surfaceDc_, &source, 0, &blend, ULW_ALPHA);
+    PlaceBackdrop();
 }
 
-void DockWindow::PaintFallback(HDC dc) {
-    if (!dc) {
+bool DockWindow::EnsureSurfaceBitmap(int width, int height) {
+    if (surfaceDc_ && surfaceBitmap_ && width <= surfaceCapacity_.cx && height <= surfaceCapacity_.cy) {
+        return true;
+    }
+
+    // Grow with headroom so magnification (which widens the dock every frame) rarely reallocates.
+    const int capacityWidth = std::max(width + 256, static_cast<int>(surfaceCapacity_.cx));
+    const int capacityHeight = std::max(height, static_cast<int>(surfaceCapacity_.cy));
+    ReleaseSurfaceBitmap();
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = capacityWidth;
+    info.bmiHeader.biHeight = -capacityHeight; // top-down
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    surfaceDc_ = CreateCompatibleDC(nullptr);
+    if (!surfaceDc_) {
+        return false;
+    }
+
+    void* bits = nullptr;
+    surfaceBitmap_ = CreateDIBSection(surfaceDc_, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!surfaceBitmap_) {
+        ReleaseSurfaceBitmap();
+        return false;
+    }
+
+    previousSurfaceBitmap_ = SelectObject(surfaceDc_, surfaceBitmap_);
+    surfaceCapacity_ = {capacityWidth, capacityHeight};
+    return true;
+}
+
+void DockWindow::ReleaseSurfaceBitmap() {
+    if (surfaceDc_) {
+        if (previousSurfaceBitmap_) {
+            SelectObject(surfaceDc_, previousSurfaceBitmap_);
+        }
+        DeleteDC(surfaceDc_);
+    }
+    if (surfaceBitmap_) {
+        DeleteObject(surfaceBitmap_);
+    }
+
+    surfaceDc_ = nullptr;
+    surfaceBitmap_ = nullptr;
+    previousSurfaceBitmap_ = nullptr;
+    surfaceCapacity_ = {};
+}
+
+void DockWindow::PlaceBackdrop() {
+    if (!hwnd_ || !IsWindowVisible(hwnd_)) {
         return;
     }
 
-    RECT client = {};
-    GetClientRect(hwnd_, &client);
-    HBRUSH background = CreateSolidBrush(RGB(32, 36, 42));
-    HPEN border = CreatePen(PS_SOLID, 1, RGB(130, 136, 148));
-    HFONT font = CreateFontW(
-        -16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-
-    SelectObject(dc, background);
-    SelectObject(dc, border);
-    RoundRect(dc, client.left, client.top, client.right, client.bottom, 28, 28);
-
-    SelectObject(dc, font);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(245, 247, 251));
-    DrawTextW(dc, L"MyDock", -1, &client, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    DeleteObject(font);
-    DeleteObject(border);
-    DeleteObject(background);
+    const RECT glass = {
+        dockPosition_.x + kBackdropInset,
+        dockPosition_.y + kSurfaceTop + kBackdropInset,
+        dockPosition_.x + dockSize_.cx - kBackdropInset,
+        dockPosition_.y + kSurfaceBottom - kBackdropInset,
+    };
+    backdrop_.Place(hwnd_, glass, kSurfaceRadius - kBackdropInset);
 }
 
 void DockWindow::PaintDockSurface() {
-    const auto rect = RectF(0.5f, static_cast<float>(kSurfaceTop), static_cast<float>(dockSize_.cx) - 0.5f, static_cast<float>(kSurfaceBottom));
-    const auto rounded = D2D1::RoundedRect(rect, static_cast<float>(kSurfaceRadius), static_cast<float>(kSurfaceRadius));
-    const auto shadow = D2D1::RoundedRect(RectF(2.0f, static_cast<float>(kSurfaceTop + 6), static_cast<float>(dockSize_.cx) - 2.0f, static_cast<float>(kSurfaceBottom + 5)), static_cast<float>(kSurfaceRadius), static_cast<float>(kSurfaceRadius));
-    renderTarget_->FillRoundedRectangle(shadow, surfaceShadowBrush_.Get());
-    renderTarget_->FillRoundedRectangle(rounded, surfaceBrush_.Get());
-    renderTarget_->FillRoundedRectangle(rounded, surfaceAccentBrush_.Get());
-    renderTarget_->DrawRoundedRectangle(rounded, borderBrush_.Get(), 1.0f);
+    const float width = static_cast<float>(dockSize_.cx);
+    const float top = static_cast<float>(kSurfaceTop);
+    const float bottom = static_cast<float>(kSurfaceBottom);
+    const float radius = static_cast<float>(kSurfaceRadius);
+    const auto slab = D2D1::RoundedRect(RectF(0.0f, top, width, bottom), radius, radius);
 
-    const auto highlight = D2D1::RoundedRect(RectF(1.0f, static_cast<float>(kSurfaceTop + 1), static_cast<float>(dockSize_.cx) - 1.0f, static_cast<float>(kSurfaceTop + 24)), 22.0f, 22.0f);
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> highlightBrush;
-    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.14f), highlightBrush.GetAddressOf());
-    renderTarget_->FillRoundedRectangle(highlight, highlightBrush.Get());
+    // Soft contact shadow, kept strictly below the slab so it never darkens the glass itself.
+    if (glassShadowBrush_) {
+        renderTarget_->PushAxisAlignedClip(RectF(0.0f, bottom - 1.0f, width, static_cast<float>(kWindowHeight)), D2D1_ANTIALIAS_MODE_ALIASED);
+        for (int layer = 0; layer < 4; ++layer) {
+            const float spread = layer * 1.5f;
+            renderTarget_->FillRoundedRectangle(
+                D2D1::RoundedRect(RectF(6.0f - spread, top + 8.0f, width - 6.0f + spread, bottom + 1.0f + spread), radius, radius),
+                glassShadowBrush_.Get());
+        }
+        renderTarget_->PopAxisAlignedClip();
+    }
+
+    if (glassTintBrush_) {
+        renderTarget_->FillRoundedRectangle(slab, glassTintBrush_.Get());
+    }
+
+    if (glassEdgeStops_) {
+        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> edgeBrush;
+        if (SUCCEEDED(renderTarget_->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, top), D2D1::Point2F(width, top)),
+                glassEdgeStops_.Get(),
+                edgeBrush.GetAddressOf()))) {
+            renderTarget_->FillRoundedRectangle(slab, edgeBrush.Get());
+        }
+    }
+
+    if (glassSheenBrush_) {
+        renderTarget_->FillRoundedRectangle(
+            D2D1::RoundedRect(RectF(1.0f, top + 1.0f, width - 1.0f, top + kSurfaceHeight * 0.55f), radius - 1.0f, radius - 1.0f),
+            glassSheenBrush_.Get());
+    }
+
+    if (glassGlintBrush_) {
+        renderTarget_->FillRoundedRectangle(slab, glassGlintBrush_.Get());
+    }
+
+    if (glassInnerRimBrush_) {
+        renderTarget_->DrawRoundedRectangle(
+            D2D1::RoundedRect(RectF(2.5f, top + 2.5f, width - 2.5f, bottom - 2.5f), radius - 2.5f, radius - 2.5f),
+            glassInnerRimBrush_.Get(),
+            2.0f);
+    }
+
+    if (glassRimBrush_) {
+        renderTarget_->DrawRoundedRectangle(
+            D2D1::RoundedRect(RectF(0.75f, top + 0.75f, width - 0.75f, bottom - 0.75f), radius - 0.75f, radius - 0.75f),
+            glassRimBrush_.Get(),
+            1.25f);
+    }
 }
 
 void DockWindow::PaintSystemSection() {
@@ -997,7 +1204,7 @@ void DockWindow::StepAnimation() {
 
     if (changed) {
         UpdateLayout(true);
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        RequestRender();
     }
 }
 
@@ -1179,7 +1386,7 @@ void DockWindow::ExecuteMenuCommand(UINT command) {
         RefreshApplications();
         iconBitmaps_.clear();
         UpdateLayout(true);
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        RequestRender();
         break;
     default:
         break;
@@ -1196,7 +1403,7 @@ void DockWindow::UpdateHover(POINT point) {
         if (hoverIndex_ >= 0) {
             SetTimer(hwnd_, kTooltipTimer, kTooltipDelayMs, nullptr);
         }
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        RequestRender();
     }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DockMenuWindow.h"
+#include "GlassBackdrop.h"
 #include "IconCache.h"
 #include "NativeTaskbarController.h"
 #include "PinnedApps.h"
@@ -28,6 +29,11 @@ public:
         WindowTracker& windowTracker,
         IconCache& iconCache);
 
+    ~DockWindow();
+
+    DockWindow(const DockWindow&) = delete;
+    DockWindow& operator=(const DockWindow&) = delete;
+
     bool Create();
     void Show();
     HWND Handle() const {
@@ -49,9 +55,12 @@ private:
     void MergeApplications(const std::vector<ApplicationGroup>& running);
     void UpdateLayout(bool reposition);
     void PositionWindow(bool animate);
-    void Paint();
+    void RequestRender();
+    void Render();
+    bool EnsureSurfaceBitmap(int width, int height);
+    void ReleaseSurfaceBitmap();
+    void PlaceBackdrop();
     void PaintDockSurface();
-    void PaintFallback(HDC dc);
     void PaintSystemSection();
     void PaintApplicationSection();
     void PaintIconsWithD2D();
@@ -85,14 +94,19 @@ private:
     DockMenuWindow contextMenu_;
     SettingsWindow settingsWindow_;
     NativeTaskbarController taskbarController_;
+    GlassBackdrop backdrop_;
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory_;
     Microsoft::WRL::ComPtr<IWICImagingFactory> wicFactory_;
-    Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> renderTarget_;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> surfaceBrush_;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> surfaceAccentBrush_;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> surfaceShadowBrush_;
+    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> renderTarget_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> glassTintBrush_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> glassShadowBrush_;
+    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> glassSheenBrush_;
+    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> glassRimBrush_;
+    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> glassInnerRimBrush_;
+    Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush> glassGlintBrush_;
+    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> glassEdgeStops_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> borderBrush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> textBrush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> mutedBrush_;
@@ -123,6 +137,15 @@ private:
     bool previewAvailable_ = false;
     bool settingsAvailable_ = false;
     int currentY_ = 0;
+
+    // Per-pixel-alpha surface presented with UpdateLayeredWindow. Grown, never shrunk, because the
+    // dock width changes on every magnification frame.
+    HDC surfaceDc_ = nullptr;
+    HBITMAP surfaceBitmap_ = nullptr;
+    HGDIOBJ previousSurfaceBitmap_ = nullptr;
+    SIZE surfaceCapacity_ = {};
+    POINT dockPosition_ = {};
+    bool renderPending_ = false;
     std::chrono::steady_clock::time_point lastInsideTime_ = std::chrono::steady_clock::now();
 };
 
