@@ -81,6 +81,11 @@ private:
     std::wstring CurrentTimeText() const;
     std::wstring CurrentDateText() const;
     RECT WindowRect() const;
+    // Screen rect of the visible dock slab (the window is wider, to leave room for magnification).
+    RECT SlabScreenRect() const;
+    // Converts a client-area mouse position to slab coordinates used by layout and hit testing.
+    POINT SlabPoint(LPARAM lParam) const;
+    void ApplyTransparencySetting();
     RECT MonitorWorkArea() const;
 
     HINSTANCE instance_ = nullptr;
@@ -107,6 +112,7 @@ private:
     Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> glassInnerRimBrush_;
     Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush> glassGlintBrush_;
     Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> glassEdgeStops_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hitTestBrush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> borderBrush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> textBrush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> mutedBrush_;
@@ -145,6 +151,12 @@ private:
     HGDIOBJ previousSurfaceBitmap_ = nullptr;
     SIZE surfaceCapacity_ = {};
     POINT dockPosition_ = {};
+    // The window keeps a fixed width while icons magnify (only the slab inside it grows), so hover
+    // animation never moves or resizes the window. slabLeft_ is the slab offset inside the window.
+    int windowWidth_ = 0;
+    int slabLeft_ = 0;
+    int presentedWidth_ = 0;
+    bool transparencyEffects_ = true;
     bool renderPending_ = false;
     std::chrono::steady_clock::time_point lastInsideTime_ = std::chrono::steady_clock::now();
 };

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -40,7 +41,10 @@ constexpr int kOuterPadding = 12;
 constexpr int kSystemSectionWidth = 188;
 constexpr int kStartSearchSectionWidth = 46;
 constexpr int kFixedSectionWidth = kSystemSectionWidth + kStartSearchSectionWidth;
-constexpr int kBaseIconSize = 50;
+// Resting icon size and placement: vertically centred in the 70 px slab with a 9 px top margin,
+// leaving room for the running-window indicators underneath.
+constexpr int kBaseIconSize = 46;
+constexpr int kIconTopMargin = 9;
 constexpr int kMaxIconSize = 80;
 constexpr int kIconGap = 10;
 constexpr int kVisibleBottomMargin = 12;
@@ -52,10 +56,14 @@ constexpr float kHiddenActivationWidthRatio = 0.7f;
 constexpr int kTooltipDelayMs = 725;
 constexpr float kAnimationEase = 0.24f;
 constexpr float kFocusEase = 0.34f;
-constexpr float kIconRestingBottom = 80.0f;
+constexpr float kIconRestingBottom = static_cast<float>(kSurfaceTop + kIconTopMargin + kBaseIconSize);
+constexpr int kIndicatorTop = kSurfaceBottom - 9;
+// Extra window width on each side of the resting slab, so magnification can widen the slab
+// without resizing or moving the window.
+constexpr int kWindowSideMargin = 80;
 // The blur backdrop is inset under the glass rim so its aliased (region-clipped) edge is hidden
 // beneath the dock's anti-aliased border.
-constexpr int kBackdropInset = 1;
+constexpr int kBackdropInset = 2;
 
 float ScaleForDistance(float distance) {
     const float normalized = std::min(std::abs(distance), 2.75f) / 2.75f;
@@ -159,6 +167,32 @@ void LogDock(const wchar_t* message) {
     }
 }
 
+DWORD WindowsBuildNumber() {
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    const auto rtlGetVersion = ntdll
+        ? reinterpret_cast<RtlGetVersionFn>(reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlGetVersion")))
+        : nullptr;
+    OSVERSIONINFOW info = {};
+    info.dwOSVersionInfoSize = sizeof(info);
+    return rtlGetVersion && rtlGetVersion(&info) == 0 ? info.dwBuildNumber : 0;
+}
+
+// Settings > Personalization > Colors > Transparency effects.
+bool TransparencyEffectsEnabled() {
+    DWORD value = 1;
+    DWORD size = sizeof(value);
+    RegGetValueW(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        L"EnableTransparency",
+        RRF_RT_REG_DWORD,
+        nullptr,
+        &value,
+        &size);
+    return value != 0;
+}
+
 } // namespace
 
 DockWindow::DockWindow(
@@ -230,9 +264,8 @@ bool DockWindow::Create() {
 
     if (!backdrop_.Create()) {
         LogDock(L"GlassBackdrop::Create failed; continuing without blur");
-    } else if (!backdrop_.BlurEnabled()) {
-        LogDock(L"Glass blur unavailable; continuing with translucent tint only");
     }
+    ApplyTransparencySetting();
 
     tooltip_ = CreateWindowExW(
         WS_EX_TOPMOST,
@@ -328,12 +361,20 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     }
+    case WM_SETTINGCHANGE:
+        if (lParam && std::wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0) {
+            ApplyTransparencySetting();
+        }
+        break;
     case WM_DISPLAYCHANGE:
     case WM_DPICHANGED:
         UpdateLayout(true);
         return 0;
     case WM_MOUSEMOVE: {
-        POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const POINT point = SlabPoint(lParam);
+        if (!mouseInside_) {
+            RequestRender(); // Adds the hover hit area above the slab.
+        }
         mouseInside_ = true;
         lastInsideTime_ = std::chrono::steady_clock::now();
         UpdateHover(point);
@@ -363,12 +404,12 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             swallowLeftClick_ = false;
             return 0;
         }
-        POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const POINT point = SlabPoint(lParam);
         HandleLeftClick(point);
         return 0;
     }
     case WM_RBUTTONUP: {
-        POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const POINT point = SlabPoint(lParam);
         HandleRightClick(point);
         return 0;
     }
@@ -432,6 +473,26 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 
 void DockWindow::ApplySettings() {
     taskbarController_.ApplyEnabled(settingsStore_.Current().replaceNativeTaskbar);
+}
+
+void DockWindow::ApplyTransparencySetting() {
+    // Follow the Windows "Transparency effects" switch like the shell does: blurred glass when on,
+    // a more solid tint when off.
+    transparencyEffects_ = TransparencyEffectsEnabled();
+    const bool accentApplied = backdrop_.SetBlur(transparencyEffects_);
+
+    wchar_t message[160] = {};
+    swprintf_s(
+        message,
+        L"Glass: Windows build %lu, transparency effects %s, blur %s",
+        WindowsBuildNumber(),
+        transparencyEffects_ ? L"on" : L"off",
+        backdrop_.BlurEnabled() ? L"enabled" : (accentApplied ? L"disabled" : L"unavailable"));
+    LogDock(message);
+
+    // The tint opacity depends on the setting; rebuild brushes on the next render.
+    DiscardDeviceResources();
+    RequestRender();
 }
 
 void DockWindow::RestoreNativeTaskbarEmergency() {
@@ -508,7 +569,9 @@ bool DockWindow::CreateDeviceResources() {
 
         // Liquid glass layers, painted over the live blur from GlassBackdrop:
         // a light cool tint for legibility on bright wallpapers,
-        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x121821, 0.30f), glassTintBrush_.GetAddressOf());
+        // (more solid when Windows transparency effects are off, matching the shell),
+        renderTarget_->CreateSolidColorBrush(
+            D2D1::ColorF(0x121821, transparencyEffects_ ? 0.30f : 0.86f), glassTintBrush_.GetAddressOf());
         // a soft contact shadow under the slab,
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.07f), glassShadowBrush_.GetAddressOf());
         // a sheen on the upper half, as if lit from above,
@@ -545,6 +608,9 @@ bool DockWindow::CreateDeviceResources() {
             }
         }
 
+        // Alpha 1/255: invisible, but makes the headroom above the slab hit-testable while hovering
+        // so the cursor passing between magnified icons does not flap the hover state.
+        renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f / 255.0f), hitTestBrush_.GetAddressOf());
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF, 0.28f), borderBrush_.GetAddressOf());
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xF5F7FB, 0.98f), textBrush_.GetAddressOf());
         renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xD5DBE3, 0.92f), mutedBrush_.GetAddressOf());
@@ -601,6 +667,7 @@ void DockWindow::DiscardDeviceResources() {
     mutedBrush_.Reset();
     textBrush_.Reset();
     borderBrush_.Reset();
+    hitTestBrush_.Reset();
     glassEdgeStops_.Reset();
     glassGlintBrush_.Reset();
     glassInnerRimBrush_.Reset();
@@ -717,6 +784,15 @@ void DockWindow::UpdateLayout(bool reposition) {
     const int targetWidth = static_cast<int>(std::ceil(kFixedSectionWidth + appWidth + kOuterPadding));
     dockSize_ = {std::max(360, targetWidth), kWindowHeight};
 
+    // Window width depends only on the resting (unmagnified) slab, so hovering never resizes it.
+    const int iconCount = static_cast<int>(applications_.size());
+    const float restingAppWidth = kOuterPadding +
+                                  static_cast<float>(std::max(1, iconCount) * kBaseIconSize) +
+                                  static_cast<float>(std::max(0, iconCount - 1) * kIconGap);
+    const int restingWidth = std::max(360, static_cast<int>(std::ceil(kFixedSectionWidth + restingAppWidth + kOuterPadding)));
+    windowWidth_ = std::max(restingWidth + 2 * kWindowSideMargin, static_cast<int>(dockSize_.cx));
+    slabLeft_ = (windowWidth_ - static_cast<int>(dockSize_.cx)) / 2;
+
     float x = static_cast<float>(kFixedSectionWidth + kOuterPadding);
     for (size_t index = 0; index < applications_.size(); ++index) {
         const float size = sizes[index];
@@ -748,7 +824,7 @@ void DockWindow::PositionWindow(bool animate) {
     POINT cursor = {};
     GetCursorPos(&cursor);
 
-    RECT windowRect = WindowRect();
+    RECT windowRect = SlabScreenRect();
     const bool cursorInDock = PtInRect(&windowRect, cursor) != FALSE;
     const auto now = std::chrono::steady_clock::now();
     const bool wasHidden = hidden_;
@@ -785,7 +861,7 @@ void DockWindow::PositionWindow(bool animate) {
         contextMenu_.Hide();
     }
 
-    const int targetX = work.left + ((work.right - work.left) - dockSize_.cx) / 2;
+    const int targetX = work.left + ((work.right - work.left) - windowWidth_) / 2;
     const int visibleY = work.bottom - dockSize_.cy - kVisibleBottomMargin;
     const int hiddenY = work.bottom - kHiddenVisibleSliver;
     const int targetY = hidden_ ? hiddenY : visibleY;
@@ -805,8 +881,15 @@ void DockWindow::PositionWindow(bool animate) {
         return;
     }
 
-    // Moving does not need a re-render: shift the existing layered content and the blur together.
     dockPosition_ = {targetX, currentY_};
+    if (presentedWidth_ != windowWidth_) {
+        // The window is about to change size: move it in the same UpdateLayeredWindow call as the
+        // new content, otherwise the old image is briefly shown at the new position.
+        RequestRender();
+        return;
+    }
+
+    // Pure move (auto-hide slide): shift the existing layered content and the blur together.
     SetWindowPos(hwnd_, nullptr, dockPosition_.x, dockPosition_.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     PlaceBackdrop();
 }
@@ -827,7 +910,7 @@ void DockWindow::Render() {
         return;
     }
 
-    const int width = static_cast<int>(dockSize_.cx);
+    const int width = windowWidth_ > 0 ? windowWidth_ : static_cast<int>(dockSize_.cx);
     const int height = static_cast<int>(dockSize_.cy);
     if (width <= 0 || height <= 0 || !CreateDeviceResources() || !EnsureSurfaceBitmap(width, height)) {
         return;
@@ -838,13 +921,23 @@ void DockWindow::Render() {
         return;
     }
 
+    const float slabLeft = static_cast<float>(slabLeft_);
     renderTarget_->BeginDraw();
     renderTarget_->SetTransform(D2D1::Matrix3x2F::Identity());
     renderTarget_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    if (mouseInside_ && hitTestBrush_) {
+        renderTarget_->FillRectangle(
+            RectF(slabLeft, 0.0f, slabLeft + static_cast<float>(dockSize_.cx), static_cast<float>(kSurfaceTop)),
+            hitTestBrush_.Get());
+    }
+
+    // Everything below is laid out in slab coordinates.
+    renderTarget_->SetTransform(D2D1::Matrix3x2F::Translation(slabLeft, 0.0f));
     PaintDockSurface();
     PaintSystemSection();
     PaintApplicationSection();
     PaintIconsWithD2D();
+    renderTarget_->SetTransform(D2D1::Matrix3x2F::Identity());
     const HRESULT hr = renderTarget_->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         DiscardDeviceResources();
@@ -855,6 +948,7 @@ void DockWindow::Render() {
         return;
     }
 
+    // Position, size and content in one call, then the blur right behind it.
     POINT source = {0, 0};
     POINT destination = dockPosition_;
     SIZE size = {width, height};
@@ -862,7 +956,9 @@ void DockWindow::Render() {
     blend.BlendOp = AC_SRC_OVER;
     blend.SourceConstantAlpha = 255;
     blend.AlphaFormat = AC_SRC_ALPHA;
-    UpdateLayeredWindow(hwnd_, nullptr, &destination, &size, surfaceDc_, &source, 0, &blend, ULW_ALPHA);
+    if (UpdateLayeredWindow(hwnd_, nullptr, &destination, &size, surfaceDc_, &source, 0, &blend, ULW_ALPHA)) {
+        presentedWidth_ = width;
+    }
     PlaceBackdrop();
 }
 
@@ -924,9 +1020,9 @@ void DockWindow::PlaceBackdrop() {
     }
 
     const RECT glass = {
-        dockPosition_.x + kBackdropInset,
+        dockPosition_.x + slabLeft_ + kBackdropInset,
         dockPosition_.y + kSurfaceTop + kBackdropInset,
-        dockPosition_.x + dockSize_.cx - kBackdropInset,
+        dockPosition_.x + slabLeft_ + dockSize_.cx - kBackdropInset,
         dockPosition_.y + kSurfaceBottom - kBackdropInset,
     };
     backdrop_.Place(hwnd_, glass, kSurfaceRadius - kBackdropInset);
@@ -1056,7 +1152,7 @@ void DockWindow::PaintApplicationSection() {
 
         const float totalWidth = count * 8.0f + (count - 1) * 4.0f;
         float x = (layout.bounds.left + layout.bounds.right - totalWidth) / 2.0f;
-        const float y = static_cast<float>(kSurfaceBottom - 12);
+        const float y = static_cast<float>(kIndicatorTop);
 
         for (int line = 0; line < count; ++line) {
             renderTarget_->FillRoundedRectangle(
@@ -1219,7 +1315,7 @@ void DockWindow::HandleLeftClick(POINT point) {
         return;
     }
     if (systemButton == 2) {
-        RECT anchor = WindowRect();
+        RECT anchor = SlabScreenRect();
         if (settingsAvailable_) {
             settingsWindow_.ShowNear(anchor);
         } else {
@@ -1319,12 +1415,13 @@ void DockWindow::ShowApplicationMenu(int appIndex) {
     KillTimer(hwnd_, kTooltipTimer);
 
     RECT anchor = ToRect(iconLayouts_[static_cast<size_t>(appIndex)].bounds);
+    OffsetRect(&anchor, slabLeft_, 0);
     MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
 
     // Open above the whole dock window (which already includes headroom for magnified icons),
     // never over it.
     constexpr LONG kMenuGap = 6;
-    const RECT dock = WindowRect();
+    const RECT dock = SlabScreenRect();
     contextMenu_.Show(menuApp_.displayName, std::move(items), anchor.left, anchor.right, dock.top - kMenuGap);
 }
 
@@ -1354,10 +1451,11 @@ void DockWindow::ExecuteMenuCommand(UINT command) {
         break;
     case kMenuShowWindows: {
         // Re-locate the app: the dock may have changed since the menu opened.
-        RECT anchor = WindowRect();
+        RECT anchor = SlabScreenRect();
         for (size_t index = 0; index < applications_.size() && index < iconLayouts_.size(); ++index) {
             if (ToLower(applications_[index].id) == ToLower(app.id)) {
                 anchor = ToRect(iconLayouts_[index].bounds);
+                OffsetRect(&anchor, slabLeft_, 0);
                 MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
                 break;
             }
@@ -1445,6 +1543,7 @@ void DockWindow::MaybeShowTooltip() {
         static_cast<LONG>((layout.bounds.left + layout.bounds.right) / 2.0f),
         static_cast<LONG>(layout.bounds.top - 8.0f),
     };
+    position.x += slabLeft_;
     ClientToScreen(hwnd_, &position);
 
     SendMessageW(tooltip_, TTM_TRACKPOSITION, 0, MAKELPARAM(position.x, position.y));
@@ -1480,6 +1579,17 @@ RECT DockWindow::WindowRect() const {
         GetWindowRect(hwnd_, &rect);
     }
     return rect;
+}
+
+RECT DockWindow::SlabScreenRect() const {
+    RECT rect = WindowRect();
+    rect.left += slabLeft_;
+    rect.right = rect.left + dockSize_.cx;
+    return rect;
+}
+
+POINT DockWindow::SlabPoint(LPARAM lParam) const {
+    return {GET_X_LPARAM(lParam) - slabLeft_, GET_Y_LPARAM(lParam)};
 }
 
 RECT DockWindow::MonitorWorkArea() const {

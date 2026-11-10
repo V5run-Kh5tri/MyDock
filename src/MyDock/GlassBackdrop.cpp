@@ -2,18 +2,17 @@
 
 #include <Dwmapi.h>
 
+#include <algorithm>
+#include <cstdint>
+
 namespace MyDock {
 namespace {
 
 constexpr wchar_t kBackdropClassName[] = L"MyDockGlassBackdrop";
 
 // SetWindowCompositionAttribute definitions (user32, Windows 10+). Not in the Windows SDK headers.
-enum AccentState : int {
-    kAccentDisabled = 0,
-    kAccentEnableBlurBehind = 3,
-};
-
-constexpr int kAccentFlagUseGradientColor = 2;
+constexpr int kAccentDisabled = 0;
+constexpr int kAccentEnableBlurBehind = 3;
 constexpr int kWcaAccentPolicy = 19;
 
 struct AccentPolicy {
@@ -31,9 +30,8 @@ struct WindowCompositionAttributeData {
 
 using SetWindowCompositionAttributeFn = BOOL(WINAPI*)(HWND, WindowCompositionAttributeData*);
 
-// A whisper of cool tint on the blur itself. Most of the glass tint is painted by the dock so the
-// look stays consistent when blur is unavailable.
-constexpr DWORD kBlurTint = 0x14261C16; // AABBGGRR: alpha 0x14 over RGB(22, 28, 38)
+// Premultiplied BGRA black at alpha 1: present for the compositor, invisible to the eye.
+constexpr std::uint32_t kNearlyClearPixel = 0x01000000;
 
 constexpr DWORD kDwmWindowCornerPreference = 33;
 constexpr int kDwmCornerDoNotRound = 1;
@@ -54,17 +52,15 @@ bool GlassBackdrop::Create() {
     wc.lpfnWndProc = GlassBackdrop::WindowProc;
     wc.lpszClassName = kBackdropClassName;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    // Black client pixels carry zero alpha in the redirection surface, so the accent blur shows
-    // through untouched.
-    wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+    wc.hbrBackground = nullptr;
     if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         return false;
     }
 
-    // Deliberately not owned by the dock: owned windows are kept above their owner, and this one
-    // must sit below it.
+    // Layered + transparent: purely visual and always click-through. Deliberately not owned by the
+    // dock: owned windows are kept above their owner, and this one must sit below it.
     hwnd_ = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
         kBackdropClassName,
         L"MyDock glass",
         WS_POPUP,
@@ -83,7 +79,6 @@ bool GlassBackdrop::Create() {
 
     const int corners = kDwmCornerDoNotRound;
     DwmSetWindowAttribute(hwnd_, kDwmWindowCornerPreference, &corners, sizeof(corners));
-    blurEnabled_ = EnableBlur();
     return true;
 }
 
@@ -92,30 +87,91 @@ void GlassBackdrop::Destroy() {
         DestroyWindow(hwnd_);
     }
     hwnd_ = nullptr;
+    shown_ = false;
+    ReleaseSurface();
 }
 
-bool GlassBackdrop::EnableBlur() {
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (!user32) {
+bool GlassBackdrop::SetBlur(bool enabled) {
+    blurEnabled_ = false;
+    if (!hwnd_) {
         return false;
     }
 
-    const auto setWindowCompositionAttribute = reinterpret_cast<SetWindowCompositionAttributeFn>(
-        reinterpret_cast<void*>(GetProcAddress(user32, "SetWindowCompositionAttribute")));
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    const auto setWindowCompositionAttribute = user32
+        ? reinterpret_cast<SetWindowCompositionAttributeFn>(
+              reinterpret_cast<void*>(GetProcAddress(user32, "SetWindowCompositionAttribute")))
+        : nullptr;
     if (!setWindowCompositionAttribute) {
         return false;
     }
 
     AccentPolicy policy = {};
-    policy.accentState = kAccentEnableBlurBehind;
-    policy.accentFlags = kAccentFlagUseGradientColor;
-    policy.gradientColor = kBlurTint;
+    policy.accentState = enabled ? kAccentEnableBlurBehind : kAccentDisabled;
+    policy.accentFlags = 0;
+    policy.gradientColor = 0x01000000;
 
     WindowCompositionAttributeData data = {};
     data.attribute = kWcaAccentPolicy;
     data.data = &policy;
     data.sizeOfData = sizeof(policy);
-    return setWindowCompositionAttribute(hwnd_, &data) != FALSE;
+    const bool succeeded = setWindowCompositionAttribute(hwnd_, &data) != FALSE;
+    blurEnabled_ = enabled && succeeded;
+    return succeeded;
+}
+
+bool GlassBackdrop::EnsureSurface(int width, int height) {
+    if (surfaceDc_ && width <= surfaceCapacity_.cx && height <= surfaceCapacity_.cy) {
+        return true;
+    }
+
+    const int capacityWidth = std::max(width + 256, static_cast<int>(surfaceCapacity_.cx));
+    const int capacityHeight = std::max(height, static_cast<int>(surfaceCapacity_.cy));
+    ReleaseSurface();
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = capacityWidth;
+    info.bmiHeader.biHeight = -capacityHeight;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    surfaceDc_ = CreateCompatibleDC(nullptr);
+    if (!surfaceDc_) {
+        return false;
+    }
+
+    void* bits = nullptr;
+    surfaceBitmap_ = CreateDIBSection(surfaceDc_, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!surfaceBitmap_ || !bits) {
+        ReleaseSurface();
+        return false;
+    }
+
+    auto* pixels = static_cast<std::uint32_t*>(bits);
+    std::fill(pixels, pixels + static_cast<size_t>(capacityWidth) * static_cast<size_t>(capacityHeight), kNearlyClearPixel);
+
+    previousSurfaceBitmap_ = SelectObject(surfaceDc_, surfaceBitmap_);
+    surfaceCapacity_ = {capacityWidth, capacityHeight};
+    return true;
+}
+
+void GlassBackdrop::ReleaseSurface() {
+    if (surfaceDc_) {
+        if (previousSurfaceBitmap_) {
+            SelectObject(surfaceDc_, previousSurfaceBitmap_);
+        }
+        DeleteDC(surfaceDc_);
+    }
+    if (surfaceBitmap_) {
+        DeleteObject(surfaceBitmap_);
+    }
+
+    surfaceDc_ = nullptr;
+    surfaceBitmap_ = nullptr;
+    previousSurfaceBitmap_ = nullptr;
+    surfaceCapacity_ = {};
 }
 
 void GlassBackdrop::Place(HWND above, const RECT& screenRect, int cornerRadius) {
@@ -129,29 +185,50 @@ void GlassBackdrop::Place(HWND above, const RECT& screenRect, int cornerRadius) 
         return;
     }
 
-    if (width != regionSize_.cx || height != regionSize_.cy || cornerRadius != regionRadius_) {
+    const bool sizeChanged = width != placedRect_.right - placedRect_.left ||
+                             height != placedRect_.bottom - placedRect_.top;
+    const bool moved = screenRect.left != placedRect_.left || screenRect.top != placedRect_.top;
+
+    if (sizeChanged || moved || !shown_) {
+        if (!EnsureSurface(width, height)) {
+            return;
+        }
+
+        POINT source = {0, 0};
+        POINT destination = {screenRect.left, screenRect.top};
+        SIZE size = {width, height};
+        BLENDFUNCTION blend = {};
+        blend.BlendOp = AC_SRC_OVER;
+        blend.SourceConstantAlpha = 255;
+        blend.AlphaFormat = AC_SRC_ALPHA;
+        UpdateLayeredWindow(hwnd_, nullptr, &destination, &size, surfaceDc_, &source, 0, &blend, ULW_ALPHA);
+    }
+
+    if (sizeChanged || cornerRadius != regionRadius_) {
         HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, cornerRadius * 2, cornerRadius * 2);
-        if (region && SetWindowRgn(hwnd_, region, FALSE) == 0) {
+        if (region && SetWindowRgn(hwnd_, region, TRUE) == 0) {
             DeleteObject(region); // The system owns the region only on success.
         }
-        regionSize_ = {width, height};
         regionRadius_ = cornerRadius;
     }
 
+    placedRect_ = screenRect;
+
+    // Z-order only: position and size were applied atomically by UpdateLayeredWindow.
     SetWindowPos(
         hwnd_,
         above ? above : HWND_TOPMOST,
-        screenRect.left,
-        screenRect.top,
-        width,
-        height,
-        SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | (shown_ ? 0 : SWP_SHOWWINDOW));
+    shown_ = true;
 }
 
 LRESULT CALLBACK GlassBackdrop::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_NCHITTEST:
-        // Purely visual. The dock window above handles all input.
         return HTTRANSPARENT;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
