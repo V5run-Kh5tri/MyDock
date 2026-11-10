@@ -55,6 +55,8 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
         group.displayName = DisplayNameFromIdentity(identity);
         group.launchCommand = imagePath;
         group.iconPath = imagePath;
+        group.iconIdentity.executablePath = imagePath;
+        group.iconIdentity.iconResourcePath = imagePath;
     }
 
     WindowInfo window;

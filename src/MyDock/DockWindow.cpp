@@ -528,6 +528,13 @@ void DockWindow::MergeApplications(const std::vector<ApplicationGroup>& running)
         app.displayName = pinned.displayName;
         app.launchCommand = pinned.launchCommand;
         app.iconPath = pinned.iconPath.empty() ? pinned.launchCommand : pinned.iconPath;
+        app.iconIdentity = pinned.iconIdentity;
+        if (app.iconIdentity.iconResourcePath.empty()) {
+            app.iconIdentity.iconResourcePath = app.iconPath;
+        }
+        if (app.iconIdentity.executablePath.empty()) {
+            app.iconIdentity.executablePath = app.launchCommand;
+        }
         app.pinned = true;
 
         const auto runningMatch = runningById.find(app.id);
@@ -535,6 +542,12 @@ void DockWindow::MergeApplications(const std::vector<ApplicationGroup>& running)
             app.windows = runningMatch->second.windows;
             if (app.iconPath.empty()) {
                 app.iconPath = runningMatch->second.iconPath;
+            }
+            if (app.iconIdentity.iconResourcePath.empty()) {
+                app.iconIdentity.iconResourcePath = runningMatch->second.iconIdentity.iconResourcePath;
+            }
+            if (app.iconIdentity.executablePath.empty()) {
+                app.iconIdentity.executablePath = runningMatch->second.iconIdentity.executablePath;
             }
         }
 

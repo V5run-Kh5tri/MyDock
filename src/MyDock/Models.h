@@ -13,11 +13,21 @@ struct WindowInfo {
     bool minimized = false;
 };
 
+struct IconIdentity {
+    std::wstring shellItemPath;
+    std::wstring shortcutPath;
+    std::wstring appUserModelId;
+    std::wstring iconResourcePath;
+    int iconResourceIndex = 0;
+    std::wstring executablePath;
+};
+
 struct PinnedAppDefinition {
     std::wstring id;
     std::wstring displayName;
     std::wstring launchCommand;
     std::wstring iconPath;
+    IconIdentity iconIdentity;
 };
 
 struct ApplicationGroup {
@@ -25,6 +35,7 @@ struct ApplicationGroup {
     std::wstring displayName;
     std::wstring launchCommand;
     std::wstring iconPath;
+    IconIdentity iconIdentity;
     bool pinned = false;
     std::vector<WindowInfo> windows;
 

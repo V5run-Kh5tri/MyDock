@@ -6,6 +6,8 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <cwchar>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -47,6 +49,15 @@ std::vector<std::wstring> Split(const std::wstring& line, wchar_t delimiter) {
     return values;
 }
 
+bool SameIconIdentity(const IconIdentity& left, const IconIdentity& right) {
+    return left.shellItemPath == right.shellItemPath &&
+           left.shortcutPath == right.shortcutPath &&
+           left.appUserModelId == right.appUserModelId &&
+           left.iconResourcePath == right.iconResourcePath &&
+           left.iconResourceIndex == right.iconResourceIndex &&
+           left.executablePath == right.executablePath;
+}
+
 bool SamePinnedApps(const std::vector<PinnedAppDefinition>& left, const std::vector<PinnedAppDefinition>& right) {
     if (left.size() != right.size()) {
         return false;
@@ -56,7 +67,8 @@ bool SamePinnedApps(const std::vector<PinnedAppDefinition>& left, const std::vec
         if (ToLower(left[index].id) != ToLower(right[index].id) ||
             left[index].displayName != right[index].displayName ||
             left[index].launchCommand != right[index].launchCommand ||
-            left[index].iconPath != right[index].iconPath) {
+            left[index].iconPath != right[index].iconPath ||
+            !SameIconIdentity(left[index].iconIdentity, right[index].iconIdentity)) {
             return false;
         }
     }
@@ -86,6 +98,13 @@ PinnedAppDefinition DefinitionFromGroup(const ApplicationGroup& app) {
     definition.displayName = app.displayName;
     definition.launchCommand = app.launchCommand;
     definition.iconPath = app.iconPath.empty() ? app.launchCommand : app.iconPath;
+    definition.iconIdentity = app.iconIdentity;
+    if (definition.iconIdentity.executablePath.empty()) {
+        definition.iconIdentity.executablePath = definition.launchCommand;
+    }
+    if (definition.iconIdentity.iconResourcePath.empty()) {
+        definition.iconIdentity.iconResourcePath = definition.iconPath;
+    }
     return definition;
 }
 
@@ -102,6 +121,8 @@ PinnedAppDefinition MakePinned(
     app.displayName = std::move(displayName);
     app.launchCommand = std::move(launchCommand);
     app.iconPath = std::move(iconPath);
+    app.iconIdentity.executablePath = app.launchCommand;
+    app.iconIdentity.iconResourcePath = app.iconPath;
     return app;
 }
 
@@ -122,7 +143,9 @@ bool ShouldLogShortcutDetails(
     const std::filesystem::path& shortcut,
     const std::wstring& target,
     const std::wstring& iconPath,
+    int iconIndex,
     const std::wstring& appUserModelId) {
+    (void)iconIndex;
     const auto combined = ToLower(shortcut.wstring() + L" " + target + L" " + iconPath + L" " + appUserModelId);
     return combined.find(L"whatsapp") != std::wstring::npos ||
            combined.find(L"settings") != std::wstring::npos ||
@@ -136,8 +159,9 @@ void LogShortcutDetails(
     const std::filesystem::path& shortcut,
     const std::wstring& target,
     const std::wstring& iconPath,
+    int iconIndex,
     const std::wstring& appUserModelId) {
-    if (!ShouldLogShortcutDetails(shortcut, target, iconPath, appUserModelId)) {
+    if (!ShouldLogShortcutDetails(shortcut, target, iconPath, iconIndex, appUserModelId)) {
         return;
     }
 
@@ -155,10 +179,15 @@ void LogShortcutDetails(
     log << L"  shortcut: " << shortcut.wstring() << L"\n";
     log << L"  target: " << target << L"\n";
     log << L"  iconPath: " << iconPath << L"\n";
+    log << L"  iconIndex: " << iconIndex << L"\n";
     log << L"  appUserModelId: " << appUserModelId << L"\n";
 }
 
-std::wstring ShortcutTarget(const std::filesystem::path& shortcutPath, std::wstring* iconPath, std::wstring* appUserModelId) {
+std::wstring ShortcutTarget(
+    const std::filesystem::path& shortcutPath,
+    std::wstring* iconPath,
+    int* iconIndex,
+    std::wstring* appUserModelId) {
     Microsoft::WRL::ComPtr<IShellLinkW> shellLink;
     if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(shellLink.GetAddressOf())))) {
         return {};
@@ -186,9 +215,12 @@ std::wstring ShortcutTarget(const std::filesystem::path& shortcutPath, std::wstr
 
     if (iconPath) {
         wchar_t iconLocation[MAX_PATH] = {};
-        int iconIndex = 0;
-        if (SUCCEEDED(shellLink->GetIconLocation(iconLocation, _countof(iconLocation), &iconIndex)) && iconLocation[0] != L'\0') {
+        int resolvedIconIndex = 0;
+        if (SUCCEEDED(shellLink->GetIconLocation(iconLocation, _countof(iconLocation), &resolvedIconIndex)) && iconLocation[0] != L'\0') {
             *iconPath = iconLocation;
+            if (iconIndex) {
+                *iconIndex = resolvedIconIndex;
+            }
         }
     }
 
@@ -231,20 +263,26 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
     std::vector<PinnedAppDefinition> pins;
     for (const auto& shortcut : shortcuts) {
         std::wstring iconPath;
+        int iconIndex = 0;
         std::wstring appUserModelId;
-        std::wstring launchCommand = ShortcutTarget(shortcut, &iconPath, &appUserModelId);
+        std::wstring launchCommand = ShortcutTarget(shortcut, &iconPath, &iconIndex, &appUserModelId);
         if (launchCommand.empty()) {
             launchCommand = shortcut.wstring();
         }
         if (iconPath.empty()) {
             iconPath = shortcut.wstring();
         }
-        LogShortcutDetails(shortcut, launchCommand, iconPath, appUserModelId);
+        LogShortcutDetails(shortcut, launchCommand, iconPath, iconIndex, appUserModelId);
 
         PinnedAppDefinition app;
         app.displayName = ShortcutDisplayName(shortcut);
         app.launchCommand = launchCommand;
         app.iconPath = iconPath;
+        app.iconIdentity.shortcutPath = shortcut.wstring();
+        app.iconIdentity.appUserModelId = appUserModelId;
+        app.iconIdentity.iconResourcePath = iconPath;
+        app.iconIdentity.iconResourceIndex = iconIndex;
+        app.iconIdentity.executablePath = launchCommand == shortcut.wstring() ? std::wstring{} : launchCommand;
         app.id = (!appUserModelId.empty() && launchCommand == shortcut.wstring())
                      ? appUserModelId
                      : IdentityFromExecutable(launchCommand.empty() ? shortcut.wstring() : launchCommand);
@@ -304,6 +342,30 @@ bool SettingsStore::Load() {
                 app.id = fields[1].empty() ? IdentityFromExecutable(fields[2]) : ToLower(fields[1]);
                 app.launchCommand = fields[2];
                 app.iconPath = fields.size() >= 4 && !fields[3].empty() ? fields[3] : fields[2];
+                if (fields.size() >= 5) {
+                    app.iconIdentity.appUserModelId = fields[4];
+                }
+                if (fields.size() >= 6) {
+                    app.iconIdentity.shortcutPath = fields[5];
+                }
+                if (fields.size() >= 7) {
+                    app.iconIdentity.iconResourcePath = fields[6];
+                }
+                if (fields.size() >= 8) {
+                    app.iconIdentity.iconResourceIndex = std::wcstol(fields[7].c_str(), nullptr, 10);
+                }
+                if (fields.size() >= 9) {
+                    app.iconIdentity.shellItemPath = fields[8];
+                }
+                if (fields.size() >= 10) {
+                    app.iconIdentity.executablePath = fields[9];
+                }
+                if (app.iconIdentity.iconResourcePath.empty()) {
+                    app.iconIdentity.iconResourcePath = app.iconPath;
+                }
+                if (app.iconIdentity.executablePath.empty()) {
+                    app.iconIdentity.executablePath = app.launchCommand;
+                }
                 if (key == L"manualpin") {
                     manualPinnedApps_.push_back(std::move(app));
                 } else {
@@ -339,7 +401,13 @@ bool SettingsStore::Save() const {
         file << L"manualPin=" << app.displayName << L"|"
              << ToLower(app.id) << L"|"
              << app.launchCommand << L"|"
-             << app.iconPath << L"\n";
+             << app.iconPath << L"|"
+             << app.iconIdentity.appUserModelId << L"|"
+             << app.iconIdentity.shortcutPath << L"|"
+             << app.iconIdentity.iconResourcePath << L"|"
+             << app.iconIdentity.iconResourceIndex << L"|"
+             << app.iconIdentity.shellItemPath << L"|"
+             << app.iconIdentity.executablePath << L"\n";
     }
 
     return true;

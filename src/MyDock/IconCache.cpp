@@ -19,7 +19,25 @@
 namespace MyDock {
 namespace {
 
-void LogIconFallback(const ApplicationGroup& app, const std::vector<std::wstring>& iconSources) {
+struct IconCandidate {
+    std::wstring source;
+    int iconIndex = 0;
+    bool useIconIndex = false;
+    std::wstring reason;
+};
+
+void LogCandidate(std::wofstream& log, const wchar_t* prefix, const IconCandidate& candidate) {
+    log << prefix << candidate.source;
+    if (candidate.useIconIndex) {
+        log << L" [index=" << candidate.iconIndex << L"]";
+    }
+    if (!candidate.reason.empty()) {
+        log << L" [" << candidate.reason << L"]";
+    }
+    log << L"\n";
+}
+
+void LogIconFallback(const ApplicationGroup& app, const std::vector<IconCandidate>& iconSources) {
     wchar_t tempPath[MAX_PATH] = {};
     if (GetTempPathW(_countof(tempPath), tempPath) == 0) {
         return;
@@ -32,12 +50,21 @@ void LogIconFallback(const ApplicationGroup& app, const std::vector<std::wstring
 
     log << L"Fallback icon for: " << app.displayName << L" [" << app.id << L"]\n";
     for (const auto& source : iconSources) {
-        log << L"  source: " << source << L"\n";
+        LogCandidate(log, L"  source: ", source);
     }
 }
 
 bool ShouldLogIconDetails(const ApplicationGroup& app) {
-    const auto combined = ToLower(app.displayName + L" " + app.id + L" " + app.launchCommand + L" " + app.iconPath);
+    const auto combined = ToLower(
+        app.displayName + L" " +
+        app.id + L" " +
+        app.launchCommand + L" " +
+        app.iconPath + L" " +
+        app.iconIdentity.shellItemPath + L" " +
+        app.iconIdentity.shortcutPath + L" " +
+        app.iconIdentity.appUserModelId + L" " +
+        app.iconIdentity.iconResourcePath + L" " +
+        app.iconIdentity.executablePath);
     return combined.find(L"whatsapp") != std::wstring::npos ||
            combined.find(L"settings") != std::wstring::npos ||
            combined.find(L"systemsettings") != std::wstring::npos ||
@@ -48,9 +75,9 @@ bool ShouldLogIconDetails(const ApplicationGroup& app) {
 
 void LogIconResolution(
     const ApplicationGroup& app,
-    const std::vector<std::wstring>& iconSources,
+    const std::vector<IconCandidate>& iconSources,
     const wchar_t* method,
-    const std::wstring& source) {
+    const IconCandidate& source) {
     if (!ShouldLogIconDetails(app)) {
         return;
     }
@@ -68,18 +95,37 @@ void LogIconResolution(
     log << L"Icon resolution for: " << app.displayName << L" [" << app.id << L"]\n";
     log << L"  launchCommand: " << app.launchCommand << L"\n";
     log << L"  iconPath: " << app.iconPath << L"\n";
+    log << L"  shellItemPath: " << app.iconIdentity.shellItemPath << L"\n";
+    log << L"  shortcutPath: " << app.iconIdentity.shortcutPath << L"\n";
+    log << L"  appUserModelId: " << app.iconIdentity.appUserModelId << L"\n";
+    log << L"  iconResourcePath: " << app.iconIdentity.iconResourcePath << L"\n";
+    log << L"  iconResourceIndex: " << app.iconIdentity.iconResourceIndex << L"\n";
+    log << L"  executablePath: " << app.iconIdentity.executablePath << L"\n";
     log << L"  method: " << method << L"\n";
-    log << L"  selected: " << source << L"\n";
+    LogCandidate(log, L"  selected: ", source);
     for (const auto& candidate : iconSources) {
-        log << L"  candidate: " << candidate << L"\n";
+        LogCandidate(log, L"  candidate: ", candidate);
     }
 }
 
-void LogIconAttempt(const ApplicationGroup& app, const std::vector<std::wstring>& iconSources) {
+void LogIconAttempt(const ApplicationGroup& app, const std::vector<IconCandidate>& iconSources) {
     LogIconResolution(app, iconSources, L"attempt", {});
 }
 
 std::wstring StableIconCacheKey(const ApplicationGroup& app) {
+    const auto& icon = app.iconIdentity;
+    if (!icon.shellItemPath.empty()) {
+        return ToLower(icon.shellItemPath);
+    }
+
+    if (!icon.shortcutPath.empty()) {
+        return ToLower(icon.shortcutPath);
+    }
+
+    if (!icon.appUserModelId.empty()) {
+        return ToLower(icon.appUserModelId);
+    }
+
     if (!app.id.empty()) {
         return ToLower(app.id);
     }
@@ -146,14 +192,32 @@ std::wstring StripCommandArguments(std::wstring command) {
     return command;
 }
 
-void AddCandidate(std::vector<std::wstring>& candidates, std::set<std::wstring>& seen, std::wstring candidate) {
-    candidate = ExpandEnvironment(StripCommandArguments(std::move(candidate)));
-    if (candidate.empty()) {
+bool IsShellNamespacePath(const std::wstring& value) {
+    const auto lower = ToLower(value);
+    return lower.rfind(L"shell:", 0) == 0 || lower.rfind(L"::{", 0) == 0;
+}
+
+void AddCandidate(
+    std::vector<IconCandidate>& candidates,
+    std::set<std::wstring>& seen,
+    std::wstring source,
+    std::wstring reason = {},
+    int iconIndex = 0,
+    bool useIconIndex = false) {
+    source = IsShellNamespacePath(source)
+                 ? Trim(std::move(source))
+                 : ExpandEnvironment(StripCommandArguments(std::move(source)));
+    if (source.empty()) {
         return;
     }
 
-    const auto key = ToLower(candidate);
+    const auto key = ToLower(source) + L"|" + std::to_wstring(useIconIndex ? iconIndex : 0);
     if (seen.insert(key).second) {
+        IconCandidate candidate;
+        candidate.source = std::move(source);
+        candidate.iconIndex = iconIndex;
+        candidate.useIconIndex = useIconIndex;
+        candidate.reason = std::move(reason);
         candidates.push_back(std::move(candidate));
     }
 }
@@ -339,7 +403,7 @@ int AssetScore(const std::wstring& filename) {
 }
 
 void AddPackageAssetCandidates(
-    std::vector<std::wstring>& candidates,
+    std::vector<IconCandidate>& candidates,
     std::set<std::wstring>& seen,
     const std::filesystem::path& packageRoot,
     const std::wstring& relativeAsset) {
@@ -385,14 +449,14 @@ void AddPackageAssetCandidates(
     });
 
     for (const auto& [_, path] : variants) {
-        AddCandidate(candidates, seen, path);
+        AddCandidate(candidates, seen, path, L"package asset");
     }
 
-    AddCandidate(candidates, seen, assetPath.wstring());
+    AddCandidate(candidates, seen, assetPath.wstring(), L"package asset");
 }
 
 void AddGenericPackageLogoCandidates(
-    std::vector<std::wstring>& candidates,
+    std::vector<IconCandidate>& candidates,
     std::set<std::wstring>& seen,
     const std::filesystem::path& packageRoot) {
     const auto assetsFolder = packageRoot / L"Assets";
@@ -429,7 +493,7 @@ void AddGenericPackageLogoCandidates(
 
     size_t added = 0;
     for (const auto& [_, path] : assets) {
-        AddCandidate(candidates, seen, path);
+        AddCandidate(candidates, seen, path, L"package logo");
         if (++added >= 12) {
             break;
         }
@@ -437,7 +501,7 @@ void AddGenericPackageLogoCandidates(
 }
 
 void AddWindowsAppsPackageCandidates(
-    std::vector<std::wstring>& candidates,
+    std::vector<IconCandidate>& candidates,
     std::set<std::wstring>& seen,
     const std::wstring& source) {
     const auto packageRootText = WindowsAppsPackageRootFromPath(source);
@@ -451,7 +515,7 @@ void AddWindowsAppsPackageCandidates(
 
     if (!packageFamilyName.empty()) {
         for (const auto& appId : ExtractApplicationIds(manifest)) {
-            AddCandidate(candidates, seen, L"shell:AppsFolder\\" + packageFamilyName + L"!" + appId);
+            AddCandidate(candidates, seen, L"shell:AppsFolder\\" + packageFamilyName + L"!" + appId, L"package AUMID");
         }
     }
 
@@ -467,27 +531,39 @@ void AddWindowsAppsPackageCandidates(
 }
 
 bool MatchesText(const ApplicationGroup& app, const std::wstring& text) {
-    const auto combined = ToLower(app.displayName + L" " + app.id + L" " + app.launchCommand + L" " + app.iconPath);
+    const auto combined = ToLower(
+        app.displayName + L" " +
+        app.id + L" " +
+        app.launchCommand + L" " +
+        app.iconPath + L" " +
+        app.iconIdentity.shellItemPath + L" " +
+        app.iconIdentity.shortcutPath + L" " +
+        app.iconIdentity.appUserModelId + L" " +
+        app.iconIdentity.iconResourcePath + L" " +
+        app.iconIdentity.executablePath);
     return combined.find(text) != std::wstring::npos;
 }
 
 void AddKnownShellAppCandidates(
-    std::vector<std::wstring>& candidates,
+    std::vector<IconCandidate>& candidates,
     std::set<std::wstring>& seen,
     const ApplicationGroup& app) {
     if (MatchesText(app, L"settings") || MatchesText(app, L"immersivecontrolpanel") || MatchesText(app, L"ms-settings")) {
         AddCandidate(
             candidates,
             seen,
-            L"shell:AppsFolder\\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel");
+            L"shell:AppsFolder\\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel",
+            L"known Settings AUMID");
         AddCandidate(
             candidates,
             seen,
-            L"%SystemRoot%\\ImmersiveControlPanel\\SystemSettings.exe");
+            L"%SystemRoot%\\ImmersiveControlPanel\\SystemSettings.exe",
+            L"known Settings executable");
         AddCandidate(
             candidates,
             seen,
-            L"%SystemRoot%\\SystemApps\\Microsoft.Windows.ImmersiveControlPanel_cw5n1h2txyewy\\SystemSettings.exe");
+            L"%SystemRoot%\\SystemApps\\Microsoft.Windows.ImmersiveControlPanel_cw5n1h2txyewy\\SystemSettings.exe",
+            L"known Settings executable");
 
         const std::filesystem::path immersiveRoot = ExpandEnvironment(L"%SystemRoot%\\ImmersiveControlPanel");
         const std::filesystem::path systemAppRoot =
@@ -501,11 +577,6 @@ void AddKnownShellAppCandidates(
         AddPackageAssetCandidates(candidates, seen, systemAppRoot, L"Assets\\Square150x150Logo.png");
         AddGenericPackageLogoCandidates(candidates, seen, systemAppRoot);
     }
-}
-
-bool IsShellNamespacePath(const std::wstring& value) {
-    const auto lower = ToLower(value);
-    return lower.rfind(L"shell:", 0) == 0 || lower.rfind(L"::{", 0) == 0;
 }
 
 std::wstring SearchExecutableOnPath(const std::wstring& executable) {
@@ -555,7 +626,7 @@ std::wstring ResolveShortcutTarget(const std::wstring& shortcutPath) {
     return target;
 }
 
-std::wstring ResolveShortcutIconLocation(const std::wstring& shortcutPath) {
+IconCandidate ResolveShortcutIconLocation(const std::wstring& shortcutPath) {
     if (ToLower(std::filesystem::path(shortcutPath).extension().wstring()) != L".lnk") {
         return {};
     }
@@ -576,28 +647,46 @@ std::wstring ResolveShortcutIconLocation(const std::wstring& shortcutPath) {
         return {};
     }
 
-    return iconLocation;
+    IconCandidate candidate;
+    candidate.source = iconLocation;
+    candidate.iconIndex = iconIndex;
+    candidate.useIconIndex = true;
+    candidate.reason = L"shortcut icon location";
+    return candidate;
 }
 
-std::vector<std::wstring> ResolveIconSources(const ApplicationGroup& app) {
-    std::vector<std::wstring> candidates;
+std::vector<IconCandidate> ResolveIconSources(const ApplicationGroup& app) {
+    std::vector<IconCandidate> candidates;
     std::set<std::wstring> seen;
-    AddCandidate(candidates, seen, AppsFolderPathFromAumid(app.id));
+    const auto& icon = app.iconIdentity;
+
+    AddCandidate(candidates, seen, icon.shellItemPath, L"IconIdentity shell item");
+    AddCandidate(candidates, seen, AppsFolderPathFromAumid(icon.appUserModelId), L"IconIdentity AUMID");
+    AddCandidate(candidates, seen, AppsFolderPathFromAumid(app.id), L"application id AUMID");
+    AddCandidate(candidates, seen, icon.shortcutPath, L"IconIdentity shortcut");
     AddKnownShellAppCandidates(candidates, seen, app);
+    AddCandidate(
+        candidates,
+        seen,
+        icon.iconResourcePath,
+        L"IconIdentity icon resource",
+        icon.iconResourceIndex,
+        !icon.iconResourcePath.empty());
+    AddCandidate(candidates, seen, icon.executablePath, L"IconIdentity executable");
     AddWindowsAppsPackageCandidates(candidates, seen, app.iconPath);
     AddWindowsAppsPackageCandidates(candidates, seen, app.launchCommand);
-    AddCandidate(candidates, seen, app.iconPath);
-    AddCandidate(candidates, seen, app.launchCommand);
+    AddCandidate(candidates, seen, app.iconPath, L"legacy iconPath");
+    AddCandidate(candidates, seen, app.launchCommand, L"legacy launchCommand");
 
     const std::wstring executableName = BasenameFromPath(StripCommandArguments(app.launchCommand));
     if (!executableName.empty()) {
-        AddCandidate(candidates, seen, SearchExecutableOnPath(executableName));
-        AddCandidate(candidates, seen, QueryAppPath(HKEY_CURRENT_USER, executableName));
-        AddCandidate(candidates, seen, QueryAppPath(HKEY_LOCAL_MACHINE, executableName));
+        AddCandidate(candidates, seen, SearchExecutableOnPath(executableName), L"PATH search");
+        AddCandidate(candidates, seen, QueryAppPath(HKEY_CURRENT_USER, executableName), L"HKCU App Paths");
+        AddCandidate(candidates, seen, QueryAppPath(HKEY_LOCAL_MACHINE, executableName), L"HKLM App Paths");
 
         wchar_t windowsDirectory[MAX_PATH] = {};
         if (GetWindowsDirectoryW(windowsDirectory, _countof(windowsDirectory)) > 0) {
-            AddCandidate(candidates, seen, (std::filesystem::path(windowsDirectory) / executableName).wstring());
+            AddCandidate(candidates, seen, (std::filesystem::path(windowsDirectory) / executableName).wstring(), L"Windows directory");
         }
     }
 
@@ -605,12 +694,18 @@ std::vector<std::wstring> ResolveIconSources(const ApplicationGroup& app) {
     for (size_t index = 0; index < initialCount; ++index) {
         const auto& candidate = candidates[index];
         std::error_code ec;
-        if (!candidate.empty() && std::filesystem::exists(candidate, ec)) {
-            const auto shortcutIcon = ResolveShortcutIconLocation(candidate);
-            AddCandidate(candidates, seen, shortcutIcon);
+        if (!candidate.source.empty() && std::filesystem::exists(candidate.source, ec)) {
+            const auto shortcutIcon = ResolveShortcutIconLocation(candidate.source);
+            AddCandidate(
+                candidates,
+                seen,
+                shortcutIcon.source,
+                shortcutIcon.reason,
+                shortcutIcon.iconIndex,
+                shortcutIcon.useIconIndex);
 
-            const auto shortcutTarget = ResolveShortcutTarget(candidate);
-            AddCandidate(candidates, seen, shortcutTarget);
+            const auto shortcutTarget = ResolveShortcutTarget(candidate.source);
+            AddCandidate(candidates, seen, shortcutTarget, L"shortcut target");
         }
     }
 
@@ -705,14 +800,15 @@ HICON IconFromShellFileInfo(const std::wstring& iconSource) {
     return nullptr;
 }
 
-HICON IconFromExtractIcon(const std::wstring& iconSource) {
+HICON IconFromExtractIcon(const IconCandidate& candidate) {
+    const auto& iconSource = candidate.source;
     if (iconSource.empty()) {
         return nullptr;
     }
 
     HICON largeIcon = nullptr;
     HICON smallIcon = nullptr;
-    if (ExtractIconExW(iconSource.c_str(), 0, &largeIcon, &smallIcon, 1) > 0) {
+    if (ExtractIconExW(iconSource.c_str(), candidate.useIconIndex ? candidate.iconIndex : 0, &largeIcon, &smallIcon, 1) > 0) {
         if (largeIcon && smallIcon) {
             DestroyIcon(smallIcon);
         }
@@ -722,11 +818,15 @@ HICON IconFromExtractIcon(const std::wstring& iconSource) {
     return nullptr;
 }
 
-HICON ResolveIcon(const std::vector<std::wstring>& iconSources, std::wstring* resolvedSource, const wchar_t** resolvedMethod) {
-    for (const auto& iconSource : iconSources) {
-        if (HICON icon = IconFromShellItemImageFactory(iconSource, 256)) {
+HICON ResolveIcon(const std::vector<IconCandidate>& iconSources, IconCandidate* resolvedSource, const wchar_t** resolvedMethod) {
+    for (const auto& candidate : iconSources) {
+        if (candidate.useIconIndex) {
+            continue;
+        }
+
+        if (HICON icon = IconFromShellItemImageFactory(candidate.source, 256)) {
             if (resolvedSource) {
-                *resolvedSource = iconSource;
+                *resolvedSource = candidate;
             }
             if (resolvedMethod) {
                 *resolvedMethod = L"IShellItemImageFactory";
@@ -735,10 +835,14 @@ HICON ResolveIcon(const std::vector<std::wstring>& iconSources, std::wstring* re
         }
     }
 
-    for (const auto& iconSource : iconSources) {
-        if (HICON icon = IconFromImageFile(iconSource, 256)) {
+    for (const auto& candidate : iconSources) {
+        if (candidate.useIconIndex) {
+            continue;
+        }
+
+        if (HICON icon = IconFromImageFile(candidate.source, 256)) {
             if (resolvedSource) {
-                *resolvedSource = iconSource;
+                *resolvedSource = candidate;
             }
             if (resolvedMethod) {
                 *resolvedMethod = L"LoadImage ico";
@@ -747,10 +851,30 @@ HICON ResolveIcon(const std::vector<std::wstring>& iconSources, std::wstring* re
         }
     }
 
-    for (const auto& iconSource : iconSources) {
-        if (HICON icon = IconFromShellFileInfo(iconSource)) {
+    for (const auto& candidate : iconSources) {
+        if (!candidate.useIconIndex) {
+            continue;
+        }
+
+        if (HICON icon = IconFromExtractIcon(candidate)) {
             if (resolvedSource) {
-                *resolvedSource = iconSource;
+                *resolvedSource = candidate;
+            }
+            if (resolvedMethod) {
+                *resolvedMethod = L"ExtractIconEx indexed";
+            }
+            return icon;
+        }
+    }
+
+    for (const auto& candidate : iconSources) {
+        if (candidate.useIconIndex) {
+            continue;
+        }
+
+        if (HICON icon = IconFromShellFileInfo(candidate.source)) {
+            if (resolvedSource) {
+                *resolvedSource = candidate;
             }
             if (resolvedMethod) {
                 *resolvedMethod = L"SHGetFileInfo";
@@ -759,10 +883,14 @@ HICON ResolveIcon(const std::vector<std::wstring>& iconSources, std::wstring* re
         }
     }
 
-    for (const auto& iconSource : iconSources) {
-        if (HICON icon = IconFromExtractIcon(iconSource)) {
+    for (const auto& candidate : iconSources) {
+        if (candidate.useIconIndex) {
+            continue;
+        }
+
+        if (HICON icon = IconFromExtractIcon(candidate)) {
             if (resolvedSource) {
-                *resolvedSource = iconSource;
+                *resolvedSource = candidate;
             }
             if (resolvedMethod) {
                 *resolvedMethod = L"ExtractIconEx";
@@ -790,7 +918,7 @@ HICON IconCache::IconFor(const ApplicationGroup& app) {
     const auto iconSources = ResolveIconSources(app);
     LogIconAttempt(app, iconSources);
 
-    std::wstring resolvedSource;
+    IconCandidate resolvedSource;
     const wchar_t* resolvedMethod = L"default";
     HICON icon = ResolveIcon(iconSources, &resolvedSource, &resolvedMethod);
     if (!icon) {
