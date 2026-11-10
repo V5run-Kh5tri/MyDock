@@ -114,6 +114,7 @@ private:
     std::wstring tooltipText_;
     bool mouseInside_ = false;
     bool hidden_ = false;
+    bool menuActive_ = false;
     bool previewAvailable_ = false;
     bool settingsAvailable_ = false;
     int currentY_ = 0;

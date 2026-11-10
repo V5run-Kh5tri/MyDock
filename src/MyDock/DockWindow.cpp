@@ -635,6 +635,7 @@ void DockWindow::PositionWindow(bool animate) {
     RECT windowRect = WindowRect();
     const bool cursorInDock = PtInRect(&windowRect, cursor) != FALSE;
     const auto now = std::chrono::steady_clock::now();
+    const bool wasHidden = hidden_;
 
     if (!settingsStore_.Current().autoHide) {
         hidden_ = false;
@@ -643,6 +644,10 @@ void DockWindow::PositionWindow(bool animate) {
         lastInsideTime_ = now;
     } else if (now - lastInsideTime_ > std::chrono::milliseconds(850)) {
         hidden_ = true;
+    }
+
+    if (!wasHidden && hidden_ && menuActive_) {
+        EndMenu();
     }
 
     const int targetX = work.left + ((work.right - work.left) - dockSize_.cx) / 2;
@@ -1017,7 +1022,7 @@ void DockWindow::HandleRightClick(POINT point) {
 }
 
 void DockWindow::ShowApplicationMenu(int appIndex, POINT point) {
-    const auto& app = applications_[static_cast<size_t>(appIndex)];
+    const ApplicationGroup app = applications_[static_cast<size_t>(appIndex)];
     HMENU menu = CreatePopupMenu();
     if (!menu) {
         return;
@@ -1049,6 +1054,7 @@ void DockWindow::ShowApplicationMenu(int appIndex, POINT point) {
     ClientToScreen(hwnd_, &screenPoint);
     SetForegroundWindow(hwnd_);
 
+    menuActive_ = true;
     const UINT command = TrackPopupMenuEx(
         menu,
         TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
@@ -1056,6 +1062,7 @@ void DockWindow::ShowApplicationMenu(int appIndex, POINT point) {
         screenPoint.y,
         hwnd_,
         nullptr);
+    menuActive_ = false;
 
     DestroyMenu(menu);
     PostMessageW(hwnd_, WM_NULL, 0, 0);
@@ -1083,7 +1090,10 @@ void DockWindow::ShowApplicationMenu(int appIndex, POINT point) {
         pinnedApps_.Launch(app);
         break;
     case kMenuShowWindows: {
-        RECT anchor = ToRect(iconLayouts_[static_cast<size_t>(appIndex)].bounds);
+        RECT anchor = {point.x - 1, point.y - 1, point.x + 1, point.y + 1};
+        if (appIndex >= 0 && appIndex < static_cast<int>(iconLayouts_.size())) {
+            anchor = ToRect(iconLayouts_[static_cast<size_t>(appIndex)].bounds);
+        }
         MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
         previewWindow_.ShowFor(app, anchor);
         break;

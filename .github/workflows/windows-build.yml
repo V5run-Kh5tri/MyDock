@@ -1,0 +1,30 @@
+name: Windows Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build MyDock
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release x64
+        run: msbuild MyDock.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyDock-Release-x64
+          path: x64/Release/MyDock.exe
+          if-no-files-found: error
