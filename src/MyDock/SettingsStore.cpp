@@ -240,14 +240,32 @@ std::wstring ShortcutTarget(
     return {};
 }
 
+std::filesystem::path TaskbarPinsFolder() {
+    return RoamingAppDataFolder() / L"Microsoft" / L"Internet Explorer" / L"Quick Launch" / L"User Pinned" / L"TaskBar";
+}
+
+// Cheap fingerprint of the pinned-shortcut folder (names, sizes, write times) so the once-a-second
+// refresh only re-reads shortcuts through COM when something actually changed.
+std::wstring TaskbarPinsSignature() {
+    WIN32_FIND_DATAW data = {};
+    const auto pattern = (TaskbarPinsFolder() / L"*.lnk").wstring();
+    HANDLE find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &data, FindExSearchNameMatch, nullptr, 0);
+    if (find == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+
+    std::wstring signature;
+    do {
+        signature += data.cFileName;
+        signature += L"|" + std::to_wstring(data.nFileSizeLow) + L"|" + std::to_wstring(data.ftLastWriteTime.dwLowDateTime) +
+                     L"|" + std::to_wstring(data.ftLastWriteTime.dwHighDateTime) + L"\n";
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+    return signature;
+}
+
 std::vector<PinnedAppDefinition> NativeTaskbarPins() {
-    const auto taskbarPinsFolder =
-        RoamingAppDataFolder() /
-        L"Microsoft" /
-        L"Internet Explorer" /
-        L"Quick Launch" /
-        L"User Pinned" /
-        L"TaskBar";
+    const auto taskbarPinsFolder = TaskbarPinsFolder();
 
     std::error_code ec;
     if (!std::filesystem::exists(taskbarPinsFolder, ec)) {
@@ -439,6 +457,12 @@ bool SettingsStore::Save() const {
 }
 
 bool SettingsStore::RefreshPinnedAppsFromNativeTaskbar() {
+    auto signature = TaskbarPinsSignature();
+    if (signature == pinsSignature_) {
+        return false;
+    }
+    pinsSignature_ = std::move(signature);
+
     const auto previous = settings_.pinnedApps;
     RebuildPinnedApps(NativeTaskbarPins());
     return !SamePinnedApps(previous, settings_.pinnedApps);

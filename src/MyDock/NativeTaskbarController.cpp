@@ -114,7 +114,9 @@ void NativeTaskbarController::HideTaskbarWindows() {
             originalVisibility_[hwnd] = IsWindowVisible(hwnd) != FALSE;
         }
 
-        ShowWindow(hwnd, SW_HIDE);
+        if (IsWindowVisible(hwnd)) {
+            ShowWindow(hwnd, SW_HIDE);
+        }
     }
 }
 

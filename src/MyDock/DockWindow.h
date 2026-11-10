@@ -55,10 +55,13 @@ private:
 
     bool CreateDeviceResources();
     void DiscardDeviceResources();
-    void RefreshApplications();
+    // Returns true when something visible changed (apps, pins, window counts, names).
+    bool RefreshApplications();
     void MergeApplications(const std::vector<ApplicationGroup>& running);
     void UpdateLayout(bool reposition);
     void PositionWindow(bool animate);
+    void MoveDockTo(int x, int y);
+    void UpdateAutoHideTimer();
     void RequestRender();
     void Render();
     bool EnsureSurfaceBitmap(int width, int height);
@@ -153,7 +156,11 @@ private:
     bool swallowLeftClick_ = false;
     bool previewAvailable_ = false;
     bool settingsAvailable_ = false;
-    int currentY_ = 0;
+    // Vertical auto-hide slide, eased per display frame like magnification.
+    float slideY_ = 0.0f;
+    int slideTargetY_ = 0;
+    bool positioned_ = false;
+    std::wstring clockText_;
 
     // Per-pixel-alpha surface presented with UpdateLayeredWindow. Grown, never shrunk, because the
     // dock width changes on every magnification frame.

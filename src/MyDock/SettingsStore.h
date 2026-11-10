@@ -31,6 +31,7 @@ private:
     std::vector<PinnedAppDefinition> manualPinnedApps_;
     std::vector<std::wstring> hiddenNativePinIds_;
     std::vector<PinnedAppDefinition> legacyPinnedApps_;
+    std::wstring pinsSignature_; // Last seen TaskbarPinsSignature().
 };
 
 } // namespace MyDock

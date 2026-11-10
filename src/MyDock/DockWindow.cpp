@@ -20,7 +20,6 @@ namespace {
 
 constexpr wchar_t kDockClassName[] = L"MyDockDockWindow";
 constexpr UINT_PTR kRefreshTimer = 1;
-constexpr UINT_PTR kClockTimer = 2;
 constexpr UINT_PTR kAutoHideTimer = 3;
 constexpr UINT_PTR kTooltipTimer = 4;
 constexpr UINT kMenuOpenOrNewWindow = 1001;
@@ -54,6 +53,10 @@ constexpr float kHiddenActivationWidthRatio = 0.7f;
 constexpr int kTooltipDelayMs = 725;
 // Time constant of the magnification easing. Lower is snappier, higher is floatier.
 constexpr float kMagnifySmoothingSeconds = 0.07f;
+constexpr float kSlideSmoothingSeconds = 0.09f;
+// Auto-hide polling: responsive reveal when enabled, otherwise only follow the cursor's monitor.
+constexpr UINT kAutoHidePollMs = 50;
+constexpr UINT kIdlePollMs = 500;
 // "No icon under the cursor" focus value; far enough away that every icon rests at scale 1.
 constexpr float kNoFocus = -1000.0f;
 constexpr float kIconRestingBottom = static_cast<float>(kSurfaceTop + kIconTopMargin + kBaseIconSize);
@@ -296,8 +299,6 @@ bool DockWindow::Create() {
     UpdateLayout(false);
 
     SetTimer(hwnd_, kRefreshTimer, 1000, nullptr);
-    SetTimer(hwnd_, kClockTimer, 1000, nullptr);
-    SetTimer(hwnd_, kAutoHideTimer, 30, nullptr);
     Log::Write(L"DockWindow::Create complete");
     return true;
 }
@@ -356,6 +357,7 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_DISPLAYCHANGE:
     case WM_DPICHANGED:
         UpdateLayout(true);
+        PositionWindow(false);
         return 0;
     case WM_MOUSEMOVE: {
         const POINT point = SlabPoint(lParam);
@@ -404,18 +406,20 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     case WM_TIMER:
         if (wParam == kRefreshTimer) {
-            RefreshApplications();
-            UpdateLayout(true);
+            // Cheap when nothing changed: no layout and no redraw unless apps or the clock did.
+            if (RefreshApplications()) {
+                UpdateLayout(true);
+            }
+            auto clockText = CurrentTimeText() + L"\n" + CurrentDateText();
+            if (clockText != clockText_) {
+                clockText_ = std::move(clockText);
+                RequestRender();
+            }
             taskbarController_.ReapplyIfEnabled();
             // Re-assert z-order once a second rather than on every animation frame. Owned popups
             // (context menu, previews) stay above the dock; the backdrop goes right below it.
             SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
             PlaceBackdrop();
-            RequestRender();
-            return 0;
-        }
-        if (wParam == kClockTimer) {
-            RequestRender();
             return 0;
         }
         if (wParam == kAutoHideTimer) {
@@ -441,7 +445,6 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         return 1;
     case WM_DESTROY:
         KillTimer(hwnd_, kRefreshTimer);
-        KillTimer(hwnd_, kClockTimer);
         KillTimer(hwnd_, kAutoHideTimer);
         KillTimer(hwnd_, kTooltipTimer);
         taskbarController_.Shutdown();
@@ -457,6 +460,13 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 
 void DockWindow::ApplySettings() {
     taskbarController_.ApplyEnabled(settingsStore_.Current().replaceNativeTaskbar);
+    UpdateAutoHideTimer();
+}
+
+void DockWindow::UpdateAutoHideTimer() {
+    if (hwnd_) {
+        SetTimer(hwnd_, kAutoHideTimer, settingsStore_.Current().autoHide ? kAutoHidePollMs : kIdlePollMs, nullptr);
+    }
 }
 
 void DockWindow::ApplyTransparencySetting() {
@@ -665,13 +675,33 @@ void DockWindow::DiscardDeviceResources() {
     renderTarget_.Reset();
 }
 
-void DockWindow::RefreshApplications() {
-    if (pinnedApps_.Refresh()) {
+bool DockWindow::RefreshApplications() {
+    // What is visible in the dock: identity, name (tooltip), pin state and window count.
+    const auto visibleState = [this]() {
+        std::wstring state;
+        for (const auto& app : applications_) {
+            state += app.id + L"|" + app.displayName + (app.pinned ? L"|p|" : L"|-|") + std::to_wstring(app.windows.size()) + L"\n";
+        }
+        return state;
+    };
+
+    const bool pinsChanged = pinnedApps_.Refresh();
+    if (pinsChanged) {
         iconCache_.Clear();
         iconBitmaps_.clear();
     }
 
-    MergeApplications(windowTracker_.Snapshot());
+    const auto before = visibleState();
+    MergeApplications(windowTracker_.Snapshot()); // Always refresh window handles for clicks.
+    const bool changed = pinsChanged || visibleState() != before;
+
+    if (changed) {
+        // Release icons (and their bitmaps) of apps that left the dock.
+        for (const HICON icon : iconCache_.Retain(applications_)) {
+            iconBitmaps_.erase(icon);
+        }
+    }
+    return changed;
 }
 
 void DockWindow::MergeApplications(const std::vector<ApplicationGroup>& running) {
@@ -798,7 +828,7 @@ void DockWindow::UpdateLayout(bool reposition) {
     dividerRect_ = {kFixedSectionWidth - 1, kSurfaceTop + 12, kFixedSectionWidth, kSurfaceBottom - 12};
 
     if (reposition) {
-        PositionWindow(false);
+        PositionWindow(true); // Keeps an in-progress auto-hide slide going.
     }
     RequestRender();
 }
@@ -853,23 +883,28 @@ void DockWindow::PositionWindow(bool animate) {
     const int visibleY = work.bottom - dockSize_.cy - kVisibleBottomMargin;
     const int hiddenY = work.bottom - kHiddenVisibleSliver;
     const int targetY = hidden_ ? hiddenY : visibleY;
+    slideTargetY_ = targetY;
 
-    if (currentY_ == 0 || !animate) {
-        currentY_ = targetY;
-    } else {
-        const int delta = targetY - currentY_;
-        if (std::abs(delta) <= 2) {
-            currentY_ = targetY;
-        } else {
-            currentY_ += delta / 4;
-        }
-    }
-
-    if (dockPosition_.x == targetX && dockPosition_.y == currentY_) {
+    // Snap on first placement, explicit repositioning, or a horizontal change (monitor or width);
+    // otherwise let the per-frame animation slide the dock to its new height.
+    if (!animate || !positioned_ || targetX != dockPosition_.x) {
+        positioned_ = true;
+        slideY_ = static_cast<float>(targetY);
+        MoveDockTo(targetX, targetY);
         return;
     }
 
-    dockPosition_ = {targetX, currentY_};
+    if (std::abs(slideY_ - static_cast<float>(targetY)) >= 0.5f) {
+        StartAnimation();
+    }
+}
+
+void DockWindow::MoveDockTo(int x, int y) {
+    if (dockPosition_.x == x && dockPosition_.y == y) {
+        return;
+    }
+
+    dockPosition_ = {x, y};
     if (presentedWidth_ != windowWidth_) {
         // The window is about to change size: move it in the same UpdateLayeredWindow call as the
         // new content, otherwise the old image is briefly shown at the new position.
@@ -877,8 +912,8 @@ void DockWindow::PositionWindow(bool animate) {
         return;
     }
 
-    // Pure move (auto-hide slide): shift the existing layered content and the blur together.
-    SetWindowPos(hwnd_, nullptr, dockPosition_.x, dockPosition_.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    // Pure move: shift the existing layered content and the blur together, no re-render.
+    SetWindowPos(hwnd_, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     PlaceBackdrop();
 }
 
@@ -1277,7 +1312,19 @@ bool DockWindow::StepAnimation(float deltaSeconds) {
     if (changed) {
         UpdateLayout(true);
     }
-    return changed;
+
+    bool sliding = false;
+    if (positioned_ && std::abs(static_cast<float>(slideTargetY_) - slideY_) >= 0.5f) {
+        const float slideBlend = 1.0f - std::exp(-std::max(0.0f, deltaSeconds) / kSlideSmoothingSeconds);
+        slideY_ += (static_cast<float>(slideTargetY_) - slideY_) * slideBlend;
+        if (std::abs(static_cast<float>(slideTargetY_) - slideY_) < 0.5f) {
+            slideY_ = static_cast<float>(slideTargetY_);
+        }
+        MoveDockTo(dockPosition_.x, static_cast<int>(std::lround(slideY_)));
+        sliding = true;
+    }
+
+    return changed || sliding;
 }
 
 bool DockWindow::WantsAnimationFrames() const {

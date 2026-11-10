@@ -17,12 +17,6 @@
 namespace MyDock {
 namespace {
 
-struct EnumState {
-    const WindowTracker* tracker = nullptr;
-    DWORD currentProcessId = GetCurrentProcessId();
-    std::map<std::wstring, ApplicationGroup> groups;
-};
-
 std::wstring DisplayNameFromIdentity(const std::wstring& identity) {
     std::wstring displayName = identity;
     const auto dot = displayName.rfind(L".exe");
@@ -148,76 +142,94 @@ std::wstring ResolvePackagedAppUserModelId(
     return appUserModelId;
 }
 
-BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
-    auto* state = reinterpret_cast<EnumState*>(lParam);
-
-    if (!WindowTracker::IsAltTabCandidate(hwnd)) {
-        return TRUE;
+BOOL CALLBACK CollectCandidateWindow(HWND hwnd, LPARAM lParam) {
+    if (WindowTracker::IsAltTabCandidate(hwnd)) {
+        reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
     }
-
-    DWORD processId = 0;
-    GetWindowThreadProcessId(hwnd, &processId);
-    if (processId == 0 || processId == state->currentProcessId) {
-        return TRUE;
-    }
-
-    const auto imagePath = WindowTracker::ProcessImagePath(processId);
-    if (imagePath.empty()) {
-        return TRUE;
-    }
-
-    std::wstring appImagePath = imagePath;
-    const auto appUserModelId = ResolvePackagedAppUserModelId(hwnd, processId, imagePath, &appImagePath);
-
-    const auto identity = appUserModelId.empty() ? IdentityFromExecutable(imagePath) : ToLower(appUserModelId);
-    auto& group = state->groups[identity];
-    if (group.id.empty()) {
-        group.id = identity;
-        if (appUserModelId.empty()) {
-            group.displayName = DisplayNameFromIdentity(identity);
-            group.launchCommand = imagePath;
-            group.iconPath = imagePath;
-            group.iconIdentity.executablePath = imagePath;
-            group.iconIdentity.iconResourcePath = imagePath;
-        } else {
-            const std::wstring appsFolderPath = L"shell:AppsFolder\\" + appUserModelId;
-            group.displayName = state->tracker ? state->tracker->PackagedDisplayNameFor(appUserModelId) : std::wstring{};
-            if (group.displayName.empty()) {
-                group.displayName = WindowTracker::WindowTitle(hwnd);
-            }
-            group.launchCommand = appsFolderPath;
-            group.iconPath = appsFolderPath;
-            group.iconIdentity.shellItemPath = appsFolderPath;
-            group.iconIdentity.appUserModelId = appUserModelId;
-            // Never use ApplicationFrameHost.exe as an icon source: it has a generic icon.
-            if (!appImagePath.empty() && !IsApplicationFrameHost(appImagePath)) {
-                group.iconIdentity.executablePath = appImagePath;
-            }
-        }
-    }
-
-    WindowInfo window;
-    window.hwnd = hwnd;
-    window.title = WindowTracker::WindowTitle(hwnd);
-    window.minimized = IsIconic(hwnd) != FALSE;
-    group.windows.push_back(std::move(window));
     return TRUE;
 }
 
 } // namespace
 
 std::vector<ApplicationGroup> WindowTracker::Snapshot() const {
-    EnumState state;
-    state.tracker = this;
-    EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&state));
+    std::vector<HWND> windows;
+    EnumWindows(CollectCandidateWindow, reinterpret_cast<LPARAM>(&windows));
 
-    std::vector<ApplicationGroup> result;
-    result.reserve(state.groups.size());
+    const DWORD currentProcessId = GetCurrentProcessId();
+    std::map<std::wstring, ApplicationGroup> groups;
+    std::unordered_map<HWND, WindowIdentity> seen;
 
-    for (auto& [_, group] : state.groups) {
-        result.push_back(std::move(group));
+    for (const HWND hwnd : windows) {
+        DWORD processId = 0;
+        GetWindowThreadProcessId(hwnd, &processId);
+        if (processId == 0 || processId == currentProcessId) {
+            continue;
+        }
+
+        // HWND values can be reused, so a cached identity is only trusted for the same process.
+        WindowIdentity identity;
+        const auto cached = windowIdentities_.find(hwnd);
+        if (cached != windowIdentities_.end() && cached->second.processId == processId) {
+            identity = cached->second;
+        } else {
+            identity.processId = processId;
+            identity.imagePath = ProcessImagePath(processId);
+            if (identity.imagePath.empty()) {
+                continue;
+            }
+            identity.appImagePath = identity.imagePath;
+            identity.appUserModelId = ResolvePackagedAppUserModelId(hwnd, processId, identity.imagePath, &identity.appImagePath);
+        }
+
+        // A UWP frame may not host its app's CoreWindow yet; retry those on the next snapshot.
+        if (!(identity.appUserModelId.empty() && IsApplicationFrameHost(identity.imagePath))) {
+            seen[hwnd] = identity;
+        }
+
+        const auto& appUserModelId = identity.appUserModelId;
+        const auto& imagePath = identity.imagePath;
+        const auto groupId = appUserModelId.empty() ? IdentityFromExecutable(imagePath) : ToLower(appUserModelId);
+        auto& group = groups[groupId];
+        if (group.id.empty()) {
+            group.id = groupId;
+            if (appUserModelId.empty()) {
+                group.displayName = DisplayNameFromIdentity(groupId);
+                group.launchCommand = imagePath;
+                group.iconPath = imagePath;
+                group.iconIdentity.executablePath = imagePath;
+                group.iconIdentity.iconResourcePath = imagePath;
+            } else {
+                const std::wstring appsFolderPath = L"shell:AppsFolder\\" + appUserModelId;
+                group.displayName = PackagedDisplayNameFor(appUserModelId);
+                if (group.displayName.empty()) {
+                    group.displayName = WindowTitle(hwnd);
+                }
+                group.launchCommand = appsFolderPath;
+                group.iconPath = appsFolderPath;
+                group.iconIdentity.shellItemPath = appsFolderPath;
+                group.iconIdentity.appUserModelId = appUserModelId;
+                // Never use ApplicationFrameHost.exe as an icon source: it has a generic icon.
+                if (!identity.appImagePath.empty() && !IsApplicationFrameHost(identity.appImagePath)) {
+                    group.iconIdentity.executablePath = identity.appImagePath;
+                }
+            }
+        }
+
+        WindowInfo window;
+        window.hwnd = hwnd;
+        window.title = WindowTitle(hwnd);
+        window.minimized = IsIconic(hwnd) != FALSE;
+        group.windows.push_back(std::move(window));
     }
 
+    // Forget windows that are gone.
+    windowIdentities_ = std::move(seen);
+
+    std::vector<ApplicationGroup> result;
+    result.reserve(groups.size());
+    for (auto& [_, group] : groups) {
+        result.push_back(std::move(group));
+    }
     return result;
 }
 
