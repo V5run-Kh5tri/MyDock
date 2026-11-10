@@ -67,6 +67,10 @@ void LogIconResolution(
     }
 }
 
+void LogIconAttempt(const ApplicationGroup& app, const std::vector<std::wstring>& iconSources) {
+    LogIconResolution(app, iconSources, L"attempt", {});
+}
+
 std::wstring ExpandEnvironment(std::wstring value) {
     if (value.empty()) {
         return {};
@@ -417,6 +421,8 @@ IconCache::~IconCache() {
 
 HICON IconCache::IconFor(const ApplicationGroup& app) {
     const auto iconSources = ResolveIconSources(app);
+    LogIconAttempt(app, iconSources);
+
     const std::wstring key = ToLower(!iconSources.empty() ? iconSources.front() : app.id);
     const auto existing = icons_.find(key);
     if (existing != icons_.end()) {

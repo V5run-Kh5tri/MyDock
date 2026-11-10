@@ -118,6 +118,33 @@ std::wstring ShortcutDisplayName(const std::filesystem::path& shortcutPath) {
     return displayName.empty() ? shortcutPath.filename().wstring() : displayName;
 }
 
+void LogWhatsAppShortcut(
+    const std::filesystem::path& shortcut,
+    const std::wstring& target,
+    const std::wstring& iconPath,
+    const std::wstring& appUserModelId) {
+    const auto combined = ToLower(shortcut.wstring() + L" " + target + L" " + iconPath + L" " + appUserModelId);
+    if (combined.find(L"whatsapp") == std::wstring::npos) {
+        return;
+    }
+
+    wchar_t tempPath[MAX_PATH] = {};
+    if (GetTempPathW(_countof(tempPath), tempPath) == 0) {
+        return;
+    }
+
+    std::wofstream log(std::filesystem::path(tempPath) / L"MyDock-icons.log", std::ios::app);
+    if (!log.is_open()) {
+        return;
+    }
+
+    log << L"Native taskbar shortcut for WhatsApp\n";
+    log << L"  shortcut: " << shortcut.wstring() << L"\n";
+    log << L"  target: " << target << L"\n";
+    log << L"  iconPath: " << iconPath << L"\n";
+    log << L"  appUserModelId: " << appUserModelId << L"\n";
+}
+
 std::wstring ShortcutTarget(const std::filesystem::path& shortcutPath, std::wstring* iconPath, std::wstring* appUserModelId) {
     Microsoft::WRL::ComPtr<IShellLinkW> shellLink;
     if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(shellLink.GetAddressOf())))) {
@@ -196,18 +223,18 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
         if (launchCommand.empty()) {
             launchCommand = shortcut.wstring();
         }
-        if (!appUserModelId.empty()) {
-            iconPath = L"shell:AppsFolder\\" + appUserModelId;
-        }
         if (iconPath.empty()) {
             iconPath = shortcut.wstring();
         }
+        LogWhatsAppShortcut(shortcut, launchCommand, iconPath, appUserModelId);
 
         PinnedAppDefinition app;
         app.displayName = ShortcutDisplayName(shortcut);
         app.launchCommand = launchCommand;
         app.iconPath = iconPath;
-        app.id = !appUserModelId.empty() ? appUserModelId : IdentityFromExecutable(launchCommand.empty() ? shortcut.wstring() : launchCommand);
+        app.id = (!appUserModelId.empty() && launchCommand == shortcut.wstring())
+                     ? appUserModelId
+                     : IdentityFromExecutable(launchCommand.empty() ? shortcut.wstring() : launchCommand);
         if (app.id.empty()) {
             app.id = ToLower(shortcut.filename().wstring());
         }
