@@ -537,8 +537,18 @@ void DockWindow::MergeApplications(const std::vector<ApplicationGroup>& running)
         }
         app.pinned = true;
 
-        const auto runningMatch = runningById.find(app.id);
+        auto runningMatch = runningById.find(app.id);
+        if (runningMatch == runningById.end()) {
+            // Packaged apps run under an AUMID id; older manual pins may still use the exe name.
+            runningMatch = std::find_if(runningById.begin(), runningById.end(), [&app](const auto& entry) {
+                const auto& executable = entry.second.iconIdentity.executablePath;
+                return !entry.second.iconIdentity.appUserModelId.empty() &&
+                       !executable.empty() &&
+                       IdentityFromExecutable(executable) == app.id;
+            });
+        }
         if (runningMatch != runningById.end()) {
+            represented[runningMatch->first] = true;
             app.windows = runningMatch->second.windows;
             if (app.iconPath.empty()) {
                 app.iconPath = runningMatch->second.iconPath;

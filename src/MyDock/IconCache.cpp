@@ -70,7 +70,8 @@ bool ShouldLogIconDetails(const ApplicationGroup& app) {
            combined.find(L"systemsettings") != std::wstring::npos ||
            combined.find(L"immersivecontrolpanel") != std::wstring::npos ||
            combined.find(L"windows.immersivecontrolpanel") != std::wstring::npos ||
-           combined.find(L"ms-settings") != std::wstring::npos;
+           combined.find(L"ms-settings") != std::wstring::npos ||
+           combined.find(L"applicationframehost") != std::wstring::npos;
 }
 
 void LogIconResolution(
@@ -558,7 +559,12 @@ void AddKnownShellAppCandidates(
     std::vector<IconCandidate>& candidates,
     std::set<std::wstring>& seen,
     const ApplicationGroup& app) {
-    if (MatchesText(app, L"settings") || MatchesText(app, L"immersivecontrolpanel") || MatchesText(app, L"ms-settings")) {
+    // Only genuine Windows Settings identities. A bare "settings" substring would also hit
+    // unrelated apps (e.g. "Display Settings.lnk", "...\SettingsSync\app.exe") and give them the
+    // Windows Settings icon ahead of their own.
+    if (MatchesText(app, L"immersivecontrolpanel") ||
+        MatchesText(app, L"ms-settings:") ||
+        MatchesText(app, L"systemsettings.exe")) {
         AddCandidate(
             candidates,
             seen,

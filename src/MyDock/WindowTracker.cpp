@@ -1,9 +1,15 @@
 #include "WindowTracker.h"
 
 #include <Dwmapi.h>
+#include <Propkey.h>
 #include <Psapi.h>
+#include <ShObjIdl.h>
+#include <Shellapi.h>
 #include <Shlwapi.h>
+#include <appmodel.h>
+#include <wrl/client.h>
 
+#include <cwchar>
 #include <cwctype>
 #include <map>
 #include <utility>
@@ -12,6 +18,7 @@ namespace MyDock {
 namespace {
 
 struct EnumState {
+    const WindowTracker* tracker = nullptr;
     DWORD currentProcessId = GetCurrentProcessId();
     std::map<std::wstring, ApplicationGroup> groups;
 };
@@ -28,6 +35,117 @@ std::wstring DisplayNameFromIdentity(const std::wstring& identity) {
     }
 
     return displayName;
+}
+
+// Packaged AUMIDs have the form "<PackageFamilyName>!<ApplicationId>". Desktop apps may also put
+// free-form AUMIDs on their windows (e.g. "Chrome"); those are ignored so the existing exe-based
+// identities, pins and hidden-pin entries keep matching.
+bool IsPackagedAppUserModelId(const std::wstring& value) {
+    return value.find(L'!') != std::wstring::npos &&
+           value.find(L'\\') == std::wstring::npos &&
+           value.find(L'/') == std::wstring::npos;
+}
+
+bool IsApplicationFrameHost(const std::wstring& imagePath) {
+    return IdentityFromExecutable(imagePath) == L"applicationframehost.exe";
+}
+
+std::wstring WindowAppUserModelId(HWND hwnd) {
+    Microsoft::WRL::ComPtr<IPropertyStore> properties;
+    if (FAILED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(properties.GetAddressOf())))) {
+        return {};
+    }
+
+    PROPVARIANT value = {};
+    PropVariantInit(&value);
+    std::wstring result;
+    if (SUCCEEDED(properties->GetValue(PKEY_AppUserModel_ID, &value)) && value.vt == VT_LPWSTR && value.pwszVal) {
+        result = value.pwszVal;
+    }
+    PropVariantClear(&value);
+    return result;
+}
+
+std::wstring ProcessAppUserModelId(DWORD processId) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process) {
+        return {};
+    }
+
+    std::wstring result;
+    UINT32 length = 0;
+    if (GetApplicationUserModelId(process, &length, nullptr) == ERROR_INSUFFICIENT_BUFFER && length > 0) {
+        std::wstring buffer(length, L'\0');
+        if (GetApplicationUserModelId(process, &length, buffer.data()) == ERROR_SUCCESS) {
+            buffer.resize(std::wcslen(buffer.c_str()));
+            result = std::move(buffer);
+        }
+    }
+
+    CloseHandle(process);
+    return result;
+}
+
+struct HostedCoreWindowSearch {
+    DWORD hostProcessId = 0;
+    DWORD appProcessId = 0;
+};
+
+BOOL CALLBACK FindHostedCoreWindow(HWND child, LPARAM lParam) {
+    auto* search = reinterpret_cast<HostedCoreWindowSearch*>(lParam);
+
+    wchar_t className[64] = {};
+    if (GetClassNameW(child, className, _countof(className)) == 0 ||
+        std::wcscmp(className, L"Windows.UI.Core.CoreWindow") != 0) {
+        return TRUE;
+    }
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(child, &processId);
+    if (processId != 0 && processId != search->hostProcessId) {
+        search->appProcessId = processId;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+// UWP apps (Settings, Calculator, ...) render inside a frame window owned by
+// ApplicationFrameHost.exe, so the window's process says nothing about which app it is.
+// Resolve the packaged AUMID the way the shell does: the window's AppUserModel property first,
+// then the package identity of the process (for UWP, the process behind the hosted CoreWindow).
+std::wstring ResolvePackagedAppUserModelId(
+    HWND hwnd,
+    DWORD processId,
+    const std::wstring& imagePath,
+    std::wstring* appImagePath) {
+    auto appUserModelId = WindowAppUserModelId(hwnd);
+    if (!IsPackagedAppUserModelId(appUserModelId)) {
+        appUserModelId.clear();
+    }
+
+    DWORD appProcessId = processId;
+    if (IsApplicationFrameHost(imagePath)) {
+        HostedCoreWindowSearch search;
+        search.hostProcessId = processId;
+        EnumChildWindows(hwnd, FindHostedCoreWindow, reinterpret_cast<LPARAM>(&search));
+        appProcessId = search.appProcessId;
+    }
+
+    if (appProcessId != 0) {
+        if (appUserModelId.empty()) {
+            appUserModelId = ProcessAppUserModelId(appProcessId);
+            if (!IsPackagedAppUserModelId(appUserModelId)) {
+                appUserModelId.clear();
+            }
+        }
+
+        if (appImagePath && appProcessId != processId) {
+            *appImagePath = WindowTracker::ProcessImagePath(appProcessId);
+        }
+    }
+
+    return appUserModelId;
 }
 
 BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
@@ -48,15 +166,34 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
         return TRUE;
     }
 
-    const auto identity = IdentityFromExecutable(imagePath);
+    std::wstring appImagePath = imagePath;
+    const auto appUserModelId = ResolvePackagedAppUserModelId(hwnd, processId, imagePath, &appImagePath);
+
+    const auto identity = appUserModelId.empty() ? IdentityFromExecutable(imagePath) : ToLower(appUserModelId);
     auto& group = state->groups[identity];
     if (group.id.empty()) {
         group.id = identity;
-        group.displayName = DisplayNameFromIdentity(identity);
-        group.launchCommand = imagePath;
-        group.iconPath = imagePath;
-        group.iconIdentity.executablePath = imagePath;
-        group.iconIdentity.iconResourcePath = imagePath;
+        if (appUserModelId.empty()) {
+            group.displayName = DisplayNameFromIdentity(identity);
+            group.launchCommand = imagePath;
+            group.iconPath = imagePath;
+            group.iconIdentity.executablePath = imagePath;
+            group.iconIdentity.iconResourcePath = imagePath;
+        } else {
+            const std::wstring appsFolderPath = L"shell:AppsFolder\\" + appUserModelId;
+            group.displayName = state->tracker ? state->tracker->PackagedDisplayNameFor(appUserModelId) : std::wstring{};
+            if (group.displayName.empty()) {
+                group.displayName = WindowTracker::WindowTitle(hwnd);
+            }
+            group.launchCommand = appsFolderPath;
+            group.iconPath = appsFolderPath;
+            group.iconIdentity.shellItemPath = appsFolderPath;
+            group.iconIdentity.appUserModelId = appUserModelId;
+            // Never use ApplicationFrameHost.exe as an icon source: it has a generic icon.
+            if (!appImagePath.empty() && !IsApplicationFrameHost(appImagePath)) {
+                group.iconIdentity.executablePath = appImagePath;
+            }
+        }
     }
 
     WindowInfo window;
@@ -71,6 +208,7 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
 
 std::vector<ApplicationGroup> WindowTracker::Snapshot() const {
     EnumState state;
+    state.tracker = this;
     EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&state));
 
     std::vector<ApplicationGroup> result;
@@ -81,6 +219,28 @@ std::vector<ApplicationGroup> WindowTracker::Snapshot() const {
     }
 
     return result;
+}
+
+std::wstring WindowTracker::PackagedDisplayNameFor(const std::wstring& appUserModelId) const {
+    const auto key = ToLower(appUserModelId);
+    const auto cached = packagedDisplayNames_.find(key);
+    if (cached != packagedDisplayNames_.end()) {
+        return cached->second;
+    }
+
+    std::wstring displayName;
+    Microsoft::WRL::ComPtr<IShellItem> item;
+    const std::wstring appsFolderPath = L"shell:AppsFolder\\" + appUserModelId;
+    if (SUCCEEDED(SHCreateItemFromParsingName(appsFolderPath.c_str(), nullptr, IID_PPV_ARGS(item.GetAddressOf())))) {
+        PWSTR name = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) && name) {
+            displayName = name;
+            CoTaskMemFree(name);
+        }
+    }
+
+    packagedDisplayNames_[key] = displayName;
+    return displayName;
 }
 
 bool WindowTracker::IsAltTabCandidate(HWND hwnd) {

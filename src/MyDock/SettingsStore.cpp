@@ -348,9 +348,17 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
         app.iconIdentity.iconResourcePath = hasRelaunchIcon ? relaunchIconPath : iconPath;
         app.iconIdentity.iconResourceIndex = hasRelaunchIcon ? relaunchIconIndex : iconIndex;
         app.iconIdentity.executablePath = launchCommand == shortcut.wstring() ? std::wstring{} : launchCommand;
-        app.id = (!appUserModelId.empty() && launchCommand == shortcut.wstring())
+        // Packaged apps ("<PackageFamilyName>!<AppId>") are identified by AUMID, matching how
+        // WindowTracker identifies their running windows (UWP windows belong to
+        // ApplicationFrameHost.exe, so an exe-based id would never match).
+        const bool packagedAumid = appUserModelId.find(L'!') != std::wstring::npos &&
+                                   appUserModelId.find(L'\\') == std::wstring::npos;
+        app.id = (!appUserModelId.empty() && (packagedAumid || launchCommand == shortcut.wstring()))
                      ? appUserModelId
                      : IdentityFromExecutable(launchCommand.empty() ? shortcut.wstring() : launchCommand);
+        if (packagedAumid && app.iconIdentity.shellItemPath.empty()) {
+            app.iconIdentity.shellItemPath = L"shell:AppsFolder\\" + appUserModelId;
+        }
         if (app.id.empty()) {
             app.id = ToLower(shortcut.filename().wstring());
         }
