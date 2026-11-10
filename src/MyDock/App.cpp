@@ -2,6 +2,7 @@
 
 #include <CommCtrl.h>
 #include <Windows.h>
+#include <Dwmapi.h>
 
 #include <filesystem>
 #include <fstream>
@@ -57,10 +58,42 @@ int App::Run() {
     dockWindow.Show();
     LogStartup(L"MyDock window shown");
 
+    // Idle: block in GetMessage. Animating: drain messages, render one frame, then wait for the
+    // compositor's next frame so animation is paced by the display refresh rather than by
+    // low-resolution, low-priority WM_TIMER ticks.
     MSG message = {};
-    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
+    bool running = true;
+    while (running) {
+        if (!dockWindow.WantsAnimationFrames()) {
+            const BOOL result = GetMessageW(&message, nullptr, 0, 0);
+            if (result <= 0) {
+                break;
+            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+            continue;
+        }
+
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) {
+                running = false;
+                break;
+            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        if (!running) {
+            break;
+        }
+
+        dockWindow.AnimationFrame();
+
+        const ULONGLONG frameStart = GetTickCount64();
+        if (FAILED(DwmFlush()) || GetTickCount64() - frameStart < 2) {
+            // DWM did not block (composition idle or unavailable): avoid spinning, but keep
+            // responding to input.
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 8, QS_ALLINPUT);
+        }
     }
 
     CoUninitialize();

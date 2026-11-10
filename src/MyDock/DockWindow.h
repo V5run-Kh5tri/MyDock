@@ -36,6 +36,10 @@ public:
 
     bool Create();
     void Show();
+
+    // Driven by the app message loop once per display frame while the dock is animating.
+    bool WantsAnimationFrames() const;
+    void AnimationFrame();
     HWND Handle() const {
         return hwnd_;
     }
@@ -70,7 +74,9 @@ private:
 
     int HitTestSystemButton(POINT point) const;
     int HitTestApplication(POINT point) const;
-    void StepAnimation();
+    bool StepAnimation(float deltaSeconds);
+    void StartAnimation();
+    void UpdateFocusFromCursor(POINT slabPoint);
     void HandleLeftClick(POINT point);
     void HandleRightClick(POINT point);
     void ShowApplicationMenu(int appIndex);
@@ -124,7 +130,12 @@ private:
     std::vector<ApplicationGroup> applications_;
     std::vector<IconLayout> iconLayouts_;
     std::vector<float> iconScales_;
-    float hoverFocus_ = -1.0f;
+    // Magnification focus as a fractional icon index (kNoFocus = none), from the cursor position.
+    float hoverFocus_ = -1000.0f;
+    float targetFocus_ = -1000.0f;
+    float restingSlabWidth_ = 0.0f;
+    bool animating_ = false;
+    std::chrono::steady_clock::time_point lastAnimationFrame_ = std::chrono::steady_clock::now();
     RECT clockDateRect_ = {};
     RECT quickSettingsRect_ = {};
     RECT settingsRect_ = {};

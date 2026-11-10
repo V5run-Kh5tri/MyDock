@@ -24,7 +24,6 @@ constexpr UINT_PTR kRefreshTimer = 1;
 constexpr UINT_PTR kClockTimer = 2;
 constexpr UINT_PTR kAutoHideTimer = 3;
 constexpr UINT_PTR kTooltipTimer = 4;
-constexpr UINT_PTR kAnimationTimer = 5;
 constexpr UINT kMenuOpenOrNewWindow = 1001;
 constexpr UINT kMenuShowWindows = 1002;
 constexpr UINT kMenuCloseWindow = 1003;
@@ -54,8 +53,10 @@ constexpr int kHiddenVisibleSliver = 6;
 constexpr int kHiddenActivationHeight = 8;
 constexpr float kHiddenActivationWidthRatio = 0.7f;
 constexpr int kTooltipDelayMs = 725;
-constexpr float kAnimationEase = 0.24f;
-constexpr float kFocusEase = 0.34f;
+// Time constant of the magnification easing. Lower is snappier, higher is floatier.
+constexpr float kMagnifySmoothingSeconds = 0.07f;
+// "No icon under the cursor" focus value; far enough away that every icon rests at scale 1.
+constexpr float kNoFocus = -1000.0f;
 constexpr float kIconRestingBottom = static_cast<float>(kSurfaceTop + kIconTopMargin + kBaseIconSize);
 constexpr int kIndicatorTop = kSurfaceBottom - 9;
 // Extra window width on each side of the resting slab, so magnification can widen the slab
@@ -310,7 +311,6 @@ bool DockWindow::Create() {
     SetTimer(hwnd_, kRefreshTimer, 1000, nullptr);
     SetTimer(hwnd_, kClockTimer, 1000, nullptr);
     SetTimer(hwnd_, kAutoHideTimer, 30, nullptr);
-    SetTimer(hwnd_, kAnimationTimer, 16, nullptr);
     LogDock(L"DockWindow::Create complete");
     return true;
 }
@@ -378,6 +378,7 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         mouseInside_ = true;
         lastInsideTime_ = std::chrono::steady_clock::now();
         UpdateHover(point);
+        UpdateFocusFromCursor(point);
 
         TRACKMOUSEEVENT track = {};
         track.cbSize = sizeof(track);
@@ -391,7 +392,8 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         hoverIndex_ = -1;
         HideTooltip();
         KillTimer(hwnd_, kTooltipTimer);
-        UpdateLayout(true);
+        targetFocus_ = kNoFocus; // Icons ease back to resting size.
+        StartAnimation();
         RequestRender();
         return 0;
     case WM_LBUTTONDOWN:
@@ -431,18 +433,14 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         if (wParam == kAutoHideTimer) {
             PositionWindow(true);
-            return 0;
-        }
-        if (wParam == kTooltipTimer) {
-            MaybeShowTooltip();
-            return 0;
-        }
-        if (wParam == kAnimationTimer) {
-            StepAnimation();
             // Backstop in case WM_PAINT is not generated for the layered window.
             if (renderPending_) {
                 Render();
             }
+            return 0;
+        }
+        if (wParam == kTooltipTimer) {
+            MaybeShowTooltip();
             return 0;
         }
         break;
@@ -459,7 +457,6 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         KillTimer(hwnd_, kClockTimer);
         KillTimer(hwnd_, kAutoHideTimer);
         KillTimer(hwnd_, kTooltipTimer);
-        KillTimer(hwnd_, kAnimationTimer);
         taskbarController_.Shutdown();
         backdrop_.Destroy();
         DiscardDeviceResources();
@@ -533,8 +530,10 @@ bool DockWindow::CreateDeviceResources() {
 
     if (!renderTarget_) {
         // Renders into a premultiplied 32bpp DIB that Render() presents with UpdateLayeredWindow.
+        // Software rendering: every frame ends up in system memory anyway, and for a surface this
+        // small the CPU rasteriser avoids a GPU sync and read-back on each animation frame.
         const auto properties = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
         if (FAILED(d2dFactory_->CreateDCRenderTarget(&properties, renderTarget_.GetAddressOf()))) {
             return false;
@@ -752,7 +751,8 @@ void DockWindow::MergeApplications(const std::vector<ApplicationGroup>& running)
     applications_ = std::move(merged);
     if (hoverIndex_ >= static_cast<int>(applications_.size())) {
         hoverIndex_ = -1;
-        hoverFocus_ = -1.0f;
+        hoverFocus_ = kNoFocus;
+        targetFocus_ = kNoFocus;
     }
 }
 
@@ -790,6 +790,7 @@ void DockWindow::UpdateLayout(bool reposition) {
                                   static_cast<float>(std::max(1, iconCount) * kBaseIconSize) +
                                   static_cast<float>(std::max(0, iconCount - 1) * kIconGap);
     const int restingWidth = std::max(360, static_cast<int>(std::ceil(kFixedSectionWidth + restingAppWidth + kOuterPadding)));
+    restingSlabWidth_ = static_cast<float>(restingWidth);
     windowWidth_ = std::max(restingWidth + 2 * kWindowSideMargin, static_cast<int>(dockSize_.cx));
     slabLeft_ = (windowWidth_ - static_cast<int>(dockSize_.cx)) / 2;
 
@@ -1259,34 +1260,22 @@ int DockWindow::HitTestApplication(POINT point) const {
     return -1;
 }
 
-void DockWindow::StepAnimation() {
+bool DockWindow::StepAnimation(float deltaSeconds) {
     if (iconScales_.size() != applications_.size()) {
         iconScales_.assign(applications_.size(), 1.0f);
     }
 
-    bool changed = false;
-    const float targetFocus = hoverIndex_ >= 0 ? static_cast<float>(hoverIndex_) : -1.0f;
-    if (targetFocus >= 0.0f && hoverFocus_ < 0.0f) {
-        hoverFocus_ = targetFocus;
-        changed = true;
-    } else if (targetFocus >= 0.0f) {
-        const float focusDelta = targetFocus - hoverFocus_;
-        if (std::abs(focusDelta) < 0.015f) {
-            if (hoverFocus_ != targetFocus) {
-                hoverFocus_ = targetFocus;
-                changed = true;
-            }
-        } else {
-            hoverFocus_ += focusDelta * kFocusEase;
-            changed = true;
-        }
-    }
+    // Frame-rate independent exponential smoothing: the same feel at 60, 120 or 144 Hz and when a
+    // frame arrives late.
+    const float blend = 1.0f - std::exp(-std::max(0.0f, deltaSeconds) / kMagnifySmoothingSeconds);
+    hoverFocus_ = targetFocus_;
 
+    bool changed = false;
     for (size_t index = 0; index < iconScales_.size(); ++index) {
-        const float target = hoverIndex_ >= 0 && hoverFocus_ >= 0.0f ? ScaleForDistance(static_cast<float>(index) - hoverFocus_) : 1.0f;
+        const float target = hoverFocus_ >= kNoFocus + 1.0f ? ScaleForDistance(static_cast<float>(index) - hoverFocus_) : 1.0f;
         float& current = iconScales_[index];
         const float delta = target - current;
-        if (std::abs(delta) < 0.01f) {
+        if (std::abs(delta) < 0.002f) {
             if (current != target) {
                 current = target;
                 changed = true;
@@ -1294,13 +1283,62 @@ void DockWindow::StepAnimation() {
             continue;
         }
 
-        current += delta * kAnimationEase;
+        current += delta * blend;
         changed = true;
     }
 
     if (changed) {
         UpdateLayout(true);
-        RequestRender();
+    }
+    return changed;
+}
+
+bool DockWindow::WantsAnimationFrames() const {
+    return animating_;
+}
+
+void DockWindow::AnimationFrame() {
+    const auto now = std::chrono::steady_clock::now();
+    float deltaSeconds = std::chrono::duration<float>(now - lastAnimationFrame_).count();
+    lastAnimationFrame_ = now;
+    // After an idle period the first frame should not jump; clamp long gaps to one 60 Hz frame.
+    if (deltaSeconds <= 0.0f || deltaSeconds > 0.05f) {
+        deltaSeconds = 1.0f / 60.0f;
+    }
+
+    animating_ = StepAnimation(deltaSeconds);
+    if (renderPending_) {
+        Render(); // Present this frame now rather than on a later WM_PAINT.
+    }
+}
+
+void DockWindow::StartAnimation() {
+    if (!animating_) {
+        animating_ = true;
+        lastAnimationFrame_ = std::chrono::steady_clock::now();
+    }
+}
+
+void DockWindow::UpdateFocusFromCursor(POINT slabPoint) {
+    // Magnification follows the cursor continuously (like the macOS dock) instead of snapping to
+    // the hovered icon's index. The focus is measured against the resting (unmagnified) layout,
+    // which does not move as icons grow, so there is no feedback between cursor and layout.
+    const int count = static_cast<int>(applications_.size());
+    float focus = kNoFocus;
+    if (count > 0 && slabPoint.y >= 0 && slabPoint.y < kSurfaceBottom) {
+        const float windowX = static_cast<float>(slabPoint.x + slabLeft_);
+        const float restingSlabLeft = (windowWidth_ - restingSlabWidth_) / 2.0f;
+        const float firstCenter = kFixedSectionWidth + kOuterPadding + kBaseIconSize / 2.0f;
+        const float pitch = static_cast<float>(kBaseIconSize + kIconGap);
+        const float candidate = (windowX - restingSlabLeft - firstCenter) / pitch;
+        if (candidate >= -0.5f && candidate <= count - 0.5f) {
+            focus = candidate;
+        }
+    }
+
+    if (focus != targetFocus_) {
+        targetFocus_ = focus;
+        StartAnimation();
     }
 }
 
