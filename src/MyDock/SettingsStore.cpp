@@ -189,53 +189,6 @@ bool ParseIconResourceString(const std::wstring& resource, std::wstring* iconPat
     return true;
 }
 
-bool ShouldLogShortcutDetails(
-    const std::filesystem::path& shortcut,
-    const std::wstring& target,
-    const std::wstring& iconPath,
-    int iconIndex,
-    const std::wstring& appUserModelId,
-    const std::wstring& relaunchIconResource) {
-    (void)iconIndex;
-    const auto combined = ToLower(shortcut.wstring() + L" " + target + L" " + iconPath + L" " + appUserModelId + L" " + relaunchIconResource);
-    return combined.find(L"whatsapp") != std::wstring::npos ||
-           combined.find(L"settings") != std::wstring::npos ||
-           combined.find(L"systemsettings") != std::wstring::npos ||
-           combined.find(L"immersivecontrolpanel") != std::wstring::npos ||
-           combined.find(L"windows.immersivecontrolpanel") != std::wstring::npos ||
-           combined.find(L"ms-settings") != std::wstring::npos;
-}
-
-void LogShortcutDetails(
-    const std::filesystem::path& shortcut,
-    const std::wstring& target,
-    const std::wstring& iconPath,
-    int iconIndex,
-    const std::wstring& appUserModelId,
-    const std::wstring& relaunchIconResource) {
-    if (!ShouldLogShortcutDetails(shortcut, target, iconPath, iconIndex, appUserModelId, relaunchIconResource)) {
-        return;
-    }
-
-    wchar_t tempPath[MAX_PATH] = {};
-    if (GetTempPathW(_countof(tempPath), tempPath) == 0) {
-        return;
-    }
-
-    std::wofstream log(std::filesystem::path(tempPath) / L"MyDock-icons.log", std::ios::app);
-    if (!log.is_open()) {
-        return;
-    }
-
-    log << L"Native taskbar shortcut for tracked app\n";
-    log << L"  shortcut: " << shortcut.wstring() << L"\n";
-    log << L"  target: " << target << L"\n";
-    log << L"  iconPath: " << iconPath << L"\n";
-    log << L"  iconIndex: " << iconIndex << L"\n";
-    log << L"  appUserModelId: " << appUserModelId << L"\n";
-    log << L"  relaunchIconResource: " << relaunchIconResource << L"\n";
-}
-
 std::wstring ShortcutTarget(
     const std::filesystem::path& shortcutPath,
     std::wstring* iconPath,
@@ -337,7 +290,6 @@ std::vector<PinnedAppDefinition> NativeTaskbarPins() {
         if (iconPath.empty()) {
             iconPath = shortcut.wstring();
         }
-        LogShortcutDetails(shortcut, launchCommand, iconPath, iconIndex, appUserModelId, relaunchIconResource);
 
         PinnedAppDefinition app;
         app.displayName = ShortcutDisplayName(shortcut);

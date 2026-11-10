@@ -1,9 +1,9 @@
 #include "NativeTaskbarController.h"
 
+#include "Log.h"
+
 #include <algorithm>
 #include <cwchar>
-#include <filesystem>
-#include <fstream>
 
 namespace MyDock {
 namespace {
@@ -42,7 +42,7 @@ bool NativeTaskbarController::Initialize(HWND owner) {
                             'T') != FALSE;
 
     if (!hotkeyRegistered_) {
-        Log(L"NativeTaskbarController restore hotkey registration failed");
+        Log::Write(L"NativeTaskbarController restore hotkey registration failed");
     }
 
     return taskbarCreatedMessage_ != 0;
@@ -68,7 +68,7 @@ void NativeTaskbarController::ReapplyIfEnabled() {
 void NativeTaskbarController::EmergencyRestore() {
     enabled_ = false;
     RestoreTaskbarWindows();
-    Log(L"Native taskbar restored by emergency hotkey");
+    Log::Write(L"Native taskbar restored by emergency hotkey");
 }
 
 void NativeTaskbarController::Shutdown() {
@@ -127,18 +127,6 @@ void NativeTaskbarController::RestoreTaskbarWindows() {
     }
 
     originalVisibility_.clear();
-}
-
-void NativeTaskbarController::Log(const wchar_t* message) const {
-    wchar_t tempPath[MAX_PATH] = {};
-    if (GetTempPathW(_countof(tempPath), tempPath) == 0) {
-        return;
-    }
-
-    std::wofstream log(std::filesystem::path(tempPath) / L"MyDock.log", std::ios::app);
-    if (log.is_open()) {
-        log << message << L"\n";
-    }
 }
 
 } // namespace MyDock

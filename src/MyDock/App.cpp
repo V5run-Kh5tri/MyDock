@@ -1,27 +1,10 @@
 #include "App.h"
 
+#include "Log.h"
+
 #include <CommCtrl.h>
 #include <Windows.h>
 #include <Dwmapi.h>
-
-#include <filesystem>
-#include <fstream>
-
-namespace {
-
-void LogStartup(const wchar_t* message) {
-    wchar_t tempPath[MAX_PATH] = {};
-    if (GetTempPathW(_countof(tempPath), tempPath) == 0) {
-        return;
-    }
-
-    std::wofstream log(std::filesystem::path(tempPath) / L"MyDock.log", std::ios::app);
-    if (log.is_open()) {
-        log << message << L"\n";
-    }
-}
-
-} // namespace
 
 namespace MyDock {
 
@@ -30,7 +13,7 @@ App::App(HINSTANCE instance)
       pinnedApps_(settingsStore_) {}
 
 int App::Run() {
-    LogStartup(L"MyDock starting");
+    Log::Write(L"MyDock starting");
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     INITCOMMONCONTROLSEX controls = {};
@@ -39,7 +22,7 @@ int App::Run() {
     InitCommonControlsEx(&controls);
 
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
-        LogStartup(L"CoInitializeEx failed");
+        Log::Write(L"CoInitializeEx failed");
         MessageBoxW(nullptr, L"MyDock could not initialize COM.", L"MyDock startup error", MB_ICONERROR | MB_OK);
         return 1;
     }
@@ -49,14 +32,14 @@ int App::Run() {
 
     DockWindow dockWindow(instance_, settingsStore_, pinnedApps_, windowTracker_, iconCache_);
     if (!dockWindow.Create()) {
-        LogStartup(L"DockWindow::Create failed");
+        Log::Write(L"DockWindow::Create failed");
         MessageBoxW(nullptr, L"MyDock could not create the dock window.", L"MyDock startup error", MB_ICONERROR | MB_OK);
         CoUninitialize();
         return 1;
     }
 
     dockWindow.Show();
-    LogStartup(L"MyDock window shown");
+    Log::Write(L"MyDock window shown");
 
     // Idle: block in GetMessage. Animating: drain messages, render one frame, then wait for the
     // compositor's next frame so animation is paced by the display refresh rather than by
@@ -97,7 +80,7 @@ int App::Run() {
     }
 
     CoUninitialize();
-    LogStartup(L"MyDock exiting");
+    Log::Write(L"MyDock exiting");
     return static_cast<int>(message.wParam);
 }
 

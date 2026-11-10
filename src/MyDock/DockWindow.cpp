@@ -1,5 +1,6 @@
 #include "DockWindow.h"
 
+#include "Log.h"
 #include "ShellActions.h"
 
 #include <Dwmapi.h>
@@ -9,8 +10,6 @@
 #include <cmath>
 #include <ctime>
 #include <cwchar>
-#include <filesystem>
-#include <fstream>
 #include <initializer_list>
 #include <map>
 #include <sstream>
@@ -156,18 +155,6 @@ std::wstring FormatTwoDigits(int value) {
     return buffer;
 }
 
-void LogDock(const wchar_t* message) {
-    wchar_t tempPath[MAX_PATH] = {};
-    if (GetTempPathW(_countof(tempPath), tempPath) == 0) {
-        return;
-    }
-
-    std::wofstream log(std::filesystem::path(tempPath) / L"MyDock.log", std::ios::app);
-    if (log.is_open()) {
-        log << message << L"\n";
-    }
-}
-
 DWORD WindowsBuildNumber() {
     using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
@@ -223,7 +210,7 @@ DockWindow::~DockWindow() {
 }
 
 bool DockWindow::Create() {
-    LogDock(L"DockWindow::Create begin");
+    Log::Write(L"DockWindow::Create begin");
 
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
@@ -234,7 +221,7 @@ bool DockWindow::Create() {
     wc.hbrBackground = nullptr;
     const ATOM registered = RegisterClassExW(&wc);
     if (registered == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-        LogDock(L"RegisterClassExW failed");
+        Log::Write(L"RegisterClassExW failed");
         return false;
     }
 
@@ -253,7 +240,7 @@ bool DockWindow::Create() {
         this);
 
     if (!hwnd_) {
-        LogDock(L"CreateWindowExW dock failed");
+        Log::Write(L"CreateWindowExW dock failed");
         return false;
     }
 
@@ -264,7 +251,7 @@ bool DockWindow::Create() {
     // (the headroom above the surface) stay click-through, as with the old colour key.
 
     if (!backdrop_.Create()) {
-        LogDock(L"GlassBackdrop::Create failed; continuing without blur");
+        Log::Write(L"GlassBackdrop::Create failed; continuing without blur");
     }
     ApplyTransparencySetting();
 
@@ -289,17 +276,17 @@ bool DockWindow::Create() {
 
     previewAvailable_ = previewWindow_.Create(hwnd_);
     if (!previewAvailable_) {
-        LogDock(L"PreviewWindow::Create failed; continuing without previews");
+        Log::Write(L"PreviewWindow::Create failed; continuing without previews");
     }
 
     contextMenuAvailable_ = contextMenu_.Create(hwnd_, kMenuCommandMessage);
     if (!contextMenuAvailable_) {
-        LogDock(L"DockMenuWindow::Create failed; continuing without app context menu");
+        Log::Write(L"DockMenuWindow::Create failed; continuing without app context menu");
     }
 
     settingsAvailable_ = settingsWindow_.Create(hwnd_);
     if (!settingsAvailable_) {
-        LogDock(L"SettingsWindow::Create failed; continuing without settings popup");
+        Log::Write(L"SettingsWindow::Create failed; continuing without settings popup");
     }
 
     taskbarController_.Initialize(hwnd_);
@@ -311,7 +298,7 @@ bool DockWindow::Create() {
     SetTimer(hwnd_, kRefreshTimer, 1000, nullptr);
     SetTimer(hwnd_, kClockTimer, 1000, nullptr);
     SetTimer(hwnd_, kAutoHideTimer, 30, nullptr);
-    LogDock(L"DockWindow::Create complete");
+    Log::Write(L"DockWindow::Create complete");
     return true;
 }
 
@@ -485,7 +472,7 @@ void DockWindow::ApplyTransparencySetting() {
         WindowsBuildNumber(),
         transparencyEffects_ ? L"on" : L"off",
         backdrop_.BlurEnabled() ? L"enabled" : (accentApplied ? L"disabled" : L"unavailable"));
-    LogDock(message);
+    Log::Write(message);
 
     // The tint opacity depends on the setting; rebuild brushes on the next render.
     DiscardDeviceResources();

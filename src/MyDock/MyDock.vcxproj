@@ -79,6 +79,7 @@
     <ClCompile Include="DockWindow.cpp" />
     <ClCompile Include="GlassBackdrop.cpp" />
     <ClCompile Include="IconCache.cpp" />
+    <ClCompile Include="Log.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Models.cpp" />
     <ClCompile Include="NativeTaskbarController.cpp" />
@@ -95,6 +96,7 @@
     <ClInclude Include="DockWindow.h" />
     <ClInclude Include="GlassBackdrop.h" />
     <ClInclude Include="IconCache.h" />
+    <ClInclude Include="Log.h" />
     <ClInclude Include="Models.h" />
     <ClInclude Include="NativeTaskbarController.h" />
     <ClInclude Include="PinnedApps.h" />

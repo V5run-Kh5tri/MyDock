@@ -23,7 +23,6 @@ private:
     std::vector<HWND> DiscoverTaskbarWindows() const;
     void HideTaskbarWindows();
     void RestoreTaskbarWindows();
-    void Log(const wchar_t* message) const;
 
     HWND owner_ = nullptr;
     UINT taskbarCreatedMessage_ = 0;
