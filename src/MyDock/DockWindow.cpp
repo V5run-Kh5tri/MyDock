@@ -963,9 +963,17 @@ void DockWindow::PositionWindow(bool animate) {
     };
     const bool cursorInActivationZone = PtInRect(&activationZone, cursor) != FALSE;
 
+    // While the dock is up, the strip between it and the screen edge and the whole reveal zone
+    // also keep it open. Otherwise a cursor resting there hides the dock, and the reveal zone (or
+    // the dock sliding down under the cursor) brings it straight back, over and over.
+    RECT dockColumn = windowRect;
+    dockColumn.bottom = work.bottom;
+    const bool cursorInKeepOpenArea =
+        !hidden_ && (PtInRect(&dockColumn, cursor) != FALSE || cursorInActivationZone);
+
     if (!settingsStore_.Current().autoHide) {
         hidden_ = false;
-    } else if (cursorInDock || mouseInside_ || contextMenu_.IsVisible()) {
+    } else if (cursorInDock || cursorInKeepOpenArea || mouseInside_ || contextMenu_.IsVisible()) {
         // Keep the dock up while its context menu is open, even though the cursor is over the menu.
         hidden_ = false;
         lastInsideTime_ = now;
