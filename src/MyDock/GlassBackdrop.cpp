@@ -226,6 +226,13 @@ void GlassBackdrop::Place(HWND above, const RECT& screenRect, int cornerRadius) 
     shown_ = true;
 }
 
+void GlassBackdrop::Hide() {
+    if (hwnd_ && shown_) {
+        ShowWindow(hwnd_, SW_HIDE);
+    }
+    shown_ = false;
+}
+
 LRESULT CALLBACK GlassBackdrop::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_NCHITTEST:

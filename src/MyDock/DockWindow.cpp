@@ -4,6 +4,7 @@
 #include "ShellActions.h"
 
 #include <Dwmapi.h>
+#include <Shellapi.h>
 #include <Windowsx.h>
 
 #include <algorithm>
@@ -35,9 +36,12 @@ constexpr int kSurfaceHeight = 70;
 constexpr int kSurfaceBottom = kSurfaceTop + kSurfaceHeight;
 constexpr int kSurfaceRadius = 22;
 constexpr int kOuterPadding = 12;
-constexpr int kSystemSectionWidth = 188;
-constexpr int kStartSearchSectionWidth = 46;
-constexpr int kFixedSectionWidth = kSystemSectionWidth + kStartSearchSectionWidth;
+// Left system section: clock/date, then Start, Action centre and dock settings buttons, then a
+// divider before the app icons.
+constexpr int kFixedSectionWidth = 234;
+constexpr int kSystemButtonSize = 30;
+constexpr int kSystemButtonGap = 15;
+constexpr int kFirstSystemButtonLeft = 102;
 // Resting icon size and placement: vertically centred in the 70 px slab with a 9 px top margin,
 // leaving room for the running-window indicators underneath.
 constexpr int kBaseIconSize = 46;
@@ -416,6 +420,10 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 RequestRender();
             }
             taskbarController_.ReapplyIfEnabled();
+            if (fullscreenSuppressed_) {
+                // Never push the dock above a full-screen game, even while hidden.
+                return 0;
+            }
             // Re-assert z-order once a second rather than on every animation frame. Owned popups
             // (context menu, previews) stay above the dock; the backdrop goes right below it.
             SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
@@ -423,6 +431,10 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         if (wParam == kAutoHideTimer) {
+            // Runs every 50 ms with auto-hide on, 500 ms otherwise, so a game is noticed quickly.
+            if (UpdateFullscreenSuppression()) {
+                return 0; // No reveal zone, no slide, no repaint while a full-screen app is active.
+            }
             PositionWindow(true);
             // Backstop in case WM_PAINT is not generated for the layered window.
             if (renderPending_) {
@@ -497,6 +509,104 @@ void DockWindow::RestoreNativeTaskbarEmergency() {
     hidden_ = false;
     PositionWindow(false);
     RequestRender();
+}
+
+namespace {
+
+// Shell surfaces that can be foreground and monitor-sized without being a full-screen app:
+// the desktop, the taskbars, and the Start / Action centre / search flyouts (CoreWindow hosts;
+// full-screen UWP apps are foreground through ApplicationFrameWindow instead).
+bool IsShellSurface(HWND hwnd) {
+    if (hwnd == GetShellWindow() || hwnd == GetDesktopWindow()) {
+        return true;
+    }
+
+    wchar_t className[64] = {};
+    if (GetClassNameW(hwnd, className, static_cast<int>(sizeof(className) / sizeof(className[0]))) == 0) {
+        return false;
+    }
+    for (const wchar_t* shellClass : {L"Progman", L"WorkerW", L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd", L"Windows.UI.Core.CoreWindow"}) {
+        if (wcscmp(className, shellClass) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The same idea as Explorer's "rude window" check: the foreground window is an exclusive-mode
+// Direct3D game, or it covers its entire monitor (borderless games, F11 browsers, video players).
+bool IsFullscreenAppForeground() {
+    QUERY_USER_NOTIFICATION_STATE state = {};
+    if (SUCCEEDED(SHQueryUserNotificationState(&state)) && state == QUNS_RUNNING_D3D_FULL_SCREEN) {
+        return true;
+    }
+
+    const HWND foreground = GetForegroundWindow();
+    if (!foreground || !IsWindowVisible(foreground) || IsIconic(foreground) || IsShellSurface(foreground)) {
+        return false;
+    }
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(foreground, &processId);
+    if (processId == GetCurrentProcessId()) {
+        return false; // The dock itself or one of its popups.
+    }
+
+    BOOL cloaked = FALSE;
+    if (SUCCEEDED(DwmGetWindowAttribute(foreground, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) {
+        return false;
+    }
+
+    // An ordinary maximized window can also reach the monitor edges once the native taskbar is
+    // hidden; it keeps its title bar, full-screen apps do not.
+    const LONG_PTR style = GetWindowLongPtrW(foreground, GWL_STYLE);
+    if (IsZoomed(foreground) && (style & WS_CAPTION) == WS_CAPTION) {
+        return false;
+    }
+
+    RECT windowRect = {};
+    MONITORINFO monitor = {};
+    monitor.cbSize = sizeof(monitor);
+    const HMONITOR hmonitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL);
+    if (!hmonitor || !GetWindowRect(foreground, &windowRect) || !GetMonitorInfoW(hmonitor, &monitor)) {
+        return false;
+    }
+
+    return windowRect.left <= monitor.rcMonitor.left && windowRect.top <= monitor.rcMonitor.top &&
+           windowRect.right >= monitor.rcMonitor.right && windowRect.bottom >= monitor.rcMonitor.bottom;
+}
+
+} // namespace
+
+bool DockWindow::UpdateFullscreenSuppression() {
+    const bool fullscreen = IsFullscreenAppForeground();
+    if (fullscreen == fullscreenSuppressed_) {
+        return fullscreenSuppressed_;
+    }
+    fullscreenSuppressed_ = fullscreen;
+
+    if (fullscreen) {
+        // Hidden on every monitor: no reveal zone, no topmost re-assertion, no popups.
+        Log::Write(L"Full-screen app is active; hiding the dock");
+        contextMenu_.Hide();
+        previewWindow_.Hide();
+        settingsWindow_.Hide();
+        HideTooltip();
+        mouseInside_ = false;
+        backdrop_.Hide();
+        ShowWindow(hwnd_, SW_HIDE);
+        return true;
+    }
+
+    Log::Write(L"Full-screen app is no longer active; restoring the dock");
+    // With auto-hide on, come back tucked away rather than popping up over the new window.
+    hidden_ = settingsStore_.Current().autoHide;
+    PositionWindow(false);
+    Render(); // Hidden windows get no WM_PAINT, so bring the content up to date before showing.
+    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    PlaceBackdrop();
+    return false;
 }
 
 bool DockWindow::CreateDeviceResources() {
@@ -808,9 +918,14 @@ void DockWindow::UpdateLayout(bool reposition) {
     }
 
     clockDateRect_ = {12, kSurfaceTop + 8, 94, kSurfaceBottom - 8};
-    quickSettingsRect_ = {102, kSurfaceTop + 20, 132, kSurfaceTop + 50};
-    settingsRect_ = {142, kSurfaceTop + 20, 172, kSurfaceTop + 50};
-    startSearchRect_ = {kSystemSectionWidth, kSurfaceTop + 20, kSystemSectionWidth + 30, kSurfaceTop + 50};
+    // Left to right after the clock: Start, Action centre, dock settings.
+    const auto systemButton = [](int slot) {
+        const int left = kFirstSystemButtonLeft + slot * (kSystemButtonSize + kSystemButtonGap);
+        return RECT{left, kSurfaceTop + 20, left + kSystemButtonSize, kSurfaceTop + 20 + kSystemButtonSize};
+    };
+    startRect_ = systemButton(0);
+    actionCenterRect_ = systemButton(1);
+    settingsRect_ = systemButton(2);
     dividerRect_ = {kFixedSectionWidth - 1, kSurfaceTop + 12, kFixedSectionWidth, kSurfaceBottom - 12};
 
     if (reposition) {
@@ -1119,23 +1234,42 @@ void DockWindow::PaintSystemSection() {
         borderBrush_.Get(),
         1.0f);
 
-    const auto searchCenter = D2D1::Point2F(
-        (startSearchRect_.left + startSearchRect_.right) / 2.0f - 2.0f,
-        (startSearchRect_.top + startSearchRect_.bottom) / 2.0f - 2.0f);
-    renderTarget_->DrawEllipse(D2D1::Ellipse(searchCenter, 7.5f, 7.5f), mutedBrush_.Get(), 2.0f);
-    renderTarget_->DrawLine(
-        D2D1::Point2F(searchCenter.x + 5.5f, searchCenter.y + 5.5f),
-        D2D1::Point2F(searchCenter.x + 11.5f, searchCenter.y + 11.5f),
-        mutedBrush_.Get(),
-        2.0f);
+    // Start: the four-pane Windows logo.
+    const auto startCenter = D2D1::Point2F((startRect_.left + startRect_.right) / 2.0f, (startRect_.top + startRect_.bottom) / 2.0f);
+    constexpr float kLogoPane = 7.5f;
+    constexpr float kLogoGap = 2.0f;
+    const float logoLeft = startCenter.x - kLogoPane - kLogoGap / 2.0f;
+    const float logoTop = startCenter.y - kLogoPane - kLogoGap / 2.0f;
+    for (int row = 0; row < 2; ++row) {
+        for (int column = 0; column < 2; ++column) {
+            const float left = logoLeft + column * (kLogoPane + kLogoGap);
+            const float top = logoTop + row * (kLogoPane + kLogoGap);
+            renderTarget_->FillRoundedRectangle(
+                D2D1::RoundedRect(RectF(left, top, left + kLogoPane, top + kLogoPane), 1.2f, 1.2f),
+                mutedBrush_.Get());
+        }
+    }
 
-    const auto monitorOuter = RectF(quickSettingsRect_.left + 5.0f, quickSettingsRect_.top + 6.0f, quickSettingsRect_.right - 5.0f, quickSettingsRect_.bottom - 8.0f);
-    renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(monitorOuter, 3.0f, 3.0f), mutedBrush_.Get(), 1.8f);
-    renderTarget_->DrawLine(
-        D2D1::Point2F(quickSettingsRect_.left + 13.0f, quickSettingsRect_.bottom - 6.0f),
-        D2D1::Point2F(quickSettingsRect_.right - 13.0f, quickSettingsRect_.bottom - 6.0f),
-        mutedBrush_.Get(),
-        1.8f);
+    // Action centre (Win+A quick settings): two stacked toggle switches, one on and one off.
+    const auto actionCenter = D2D1::Point2F(
+        (actionCenterRect_.left + actionCenterRect_.right) / 2.0f,
+        (actionCenterRect_.top + actionCenterRect_.bottom) / 2.0f);
+    constexpr float kToggleHalfWidth = 10.0f;
+    constexpr float kToggleHalfHeight = 4.0f;
+    constexpr float kToggleKnobRadius = 2.0f;
+    for (int toggle = 0; toggle < 2; ++toggle) {
+        const float centerY = actionCenter.y + (toggle == 0 ? -5.5f : 5.5f);
+        const auto track = RectF(
+            actionCenter.x - kToggleHalfWidth,
+            centerY - kToggleHalfHeight,
+            actionCenter.x + kToggleHalfWidth,
+            centerY + kToggleHalfHeight);
+        renderTarget_->DrawRoundedRectangle(
+            D2D1::RoundedRect(track, kToggleHalfHeight, kToggleHalfHeight), mutedBrush_.Get(), 1.6f);
+        const float knobX = toggle == 0 ? track.right - kToggleHalfHeight : track.left + kToggleHalfHeight;
+        renderTarget_->FillEllipse(
+            D2D1::Ellipse(D2D1::Point2F(knobX, centerY), kToggleKnobRadius, kToggleKnobRadius), mutedBrush_.Get());
+    }
 
     const auto gearCenter = D2D1::Point2F((settingsRect_.left + settingsRect_.right) / 2.0f, (settingsRect_.top + settingsRect_.bottom) / 2.0f);
     renderTarget_->DrawEllipse(D2D1::Ellipse(gearCenter, 9.0f, 9.0f), mutedBrush_.Get(), 1.8f);
@@ -1245,13 +1379,13 @@ int DockWindow::HitTestSystemButton(POINT point) const {
     if (PtInRect(&clockDateRect_, point)) {
         return 3;
     }
-    if (PtInRect(&quickSettingsRect_, point)) {
+    if (PtInRect(&actionCenterRect_, point)) {
         return 1;
     }
     if (PtInRect(&settingsRect_, point)) {
         return 2;
     }
-    if (PtInRect(&startSearchRect_, point)) {
+    if (PtInRect(&startRect_, point)) {
         return 4;
     }
     return 0;
@@ -1314,7 +1448,8 @@ bool DockWindow::StepAnimation(float deltaSeconds) {
 }
 
 bool DockWindow::WantsAnimationFrames() const {
-    return animating_;
+    // No frame pacing while a full-screen game is running; the dock is hidden anyway.
+    return animating_ && !fullscreenSuppressed_;
 }
 
 void DockWindow::AnimationFrame() {

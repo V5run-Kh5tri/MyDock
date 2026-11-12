@@ -73,6 +73,9 @@ private:
     void PaintIconsWithD2D();
     void ApplySettings();
     void RestoreNativeTaskbarEmergency();
+    // Hides the dock on every monitor while a full-screen app (game, video) is the foreground
+    // window, and brings it back once a normal window is active. Returns whether suppressed.
+    bool UpdateFullscreenSuppression();
     ID2D1Bitmap* BitmapForIcon(HICON icon);
 
     int HitTestSystemButton(POINT point) const;
@@ -139,9 +142,9 @@ private:
     bool animating_ = false;
     std::chrono::steady_clock::time_point lastAnimationFrame_ = std::chrono::steady_clock::now();
     RECT clockDateRect_ = {};
-    RECT quickSettingsRect_ = {};
+    RECT actionCenterRect_ = {};
     RECT settingsRect_ = {};
-    RECT startSearchRect_ = {};
+    RECT startRect_ = {};
     RECT dividerRect_ = {};
     SIZE dockSize_ = {560, 106};
     int hoverIndex_ = -1;
@@ -150,6 +153,7 @@ private:
     std::wstring tooltipText_;
     bool mouseInside_ = false;
     bool hidden_ = false;
+    bool fullscreenSuppressed_ = false;
     ApplicationGroup menuApp_;
     bool contextMenuAvailable_ = false;
     bool swallowLeftClick_ = false;

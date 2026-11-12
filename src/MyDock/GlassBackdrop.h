@@ -34,6 +34,9 @@ public:
     // Moves the backdrop to `screenRect` (rounded by `cornerRadius`) directly below `above`.
     void Place(HWND above, const RECT& screenRect, int cornerRadius);
 
+    // Hides the backdrop; the next Place() shows it again.
+    void Hide();
+
 private:
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     bool EnsureSurface(int width, int height);
